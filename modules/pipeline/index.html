@@ -1,0 +1,1244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pathfinder - Pipeline</title>
+  <meta name="description" content="Job search pipeline tracker and kanban board">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect fill='%236366f1' width='32' height='32'/><text x='50%' y='50%' font-size='20' font-weight='700' text-anchor='middle' dominant-baseline='middle' fill='white' font-family='system-ui'>P</text></svg>">
+
+  <link rel="stylesheet" href="../shared/pathfinder.css?v=3.10.1">
+  <script src="https://unpkg.com/lucide@latest" onerror="console.warn('Lucide icon library failed to load');"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js" onerror="console.warn('Mammoth library failed to load');"></script>
+
+  <style>
+    /* Navigation */
+    .nav {
+      display: flex;
+      align-items: center;
+      height: var(--nav-height);
+      padding: 0 var(--space-6);
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--bg-subtle);
+      gap: var(--space-8);
+    }
+    .nav-brand {
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: -0.5px;
+    }
+    .nav-brand span { color: var(--accent); }
+    .nav-links {
+      display: flex;
+      gap: var(--space-6);
+      flex: 1;
+    }
+    .nav-links a {
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: color 0.2s ease;
+      padding: var(--space-2) 0;
+      border-bottom: 2px solid transparent;
+    }
+    .nav-links a:hover { color: var(--accent); }
+    .nav-links a.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .nav-right {
+      display: flex;
+      gap: var(--space-4);
+      align-items: center;
+    }
+    .nav-kbd {
+      display: none;
+      background: var(--bg-subtle);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      color: var(--text-tertiary);
+    }
+
+    /* Page layout */
+    .page {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      padding-top: var(--nav-height);
+      background: var(--bg-base);
+      overflow: hidden;
+    }
+    .page-header {
+      padding: var(--space-6);
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--bg-subtle);
+      flex-shrink: 0;
+    }
+    .page-title {
+      margin: 0;
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    /* Toolbar */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      padding: var(--space-3) var(--space-4);
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--bg-subtle);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .toolbar-search {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      background: var(--bg-base);
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-md);
+      padding: var(--space-2) var(--space-3);
+      flex: 0 1 300px;
+    }
+    .toolbar-search input {
+      border: none;
+      background: transparent;
+      outline: none;
+      flex: 1;
+      color: var(--text-primary);
+      font-size: 0.9rem;
+    }
+    .toolbar-search input::placeholder {
+      color: var(--text-tertiary);
+    }
+    .toolbar-search svg {
+      color: var(--text-tertiary);
+      flex-shrink: 0;
+    }
+
+    .toolbar-filter {
+      display: flex;
+      gap: var(--space-2);
+      flex: 1;
+      flex-wrap: wrap;
+    }
+    .toolbar-controls {
+      display: flex;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .toolbar-button {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      padding: var(--space-2) var(--space-3);
+      background: var(--bg-base);
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-md);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      white-space: nowrap;
+      transition: all 0.2s ease;
+    }
+    .toolbar-button:hover {
+      background: var(--bg-elevated);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .toolbar-button.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+    select.toolbar-button {
+      padding-right: var(--space-6);
+    }
+
+    /* Main content areas */
+    .content-wrapper {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+    }
+    .content-wrapper > div {
+      display: none;
+      flex: 1;
+      overflow: hidden;
+    }
+    .content-wrapper.kanban-active .kanban {
+      display: flex;
+    }
+    .content-wrapper.table-active .table-view {
+      display: flex;
+    }
+    .content-wrapper.companies-active .companies-view {
+      display: flex;
+    }
+
+    /* Kanban */
+    .kanban {
+      display: flex;
+      gap: var(--space-3);
+      padding: var(--space-3);
+      overflow-x: auto;
+      overflow-y: hidden;
+      height: calc(100vh - 220px);
+    }
+    .kanban-column {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-surface);
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-lg);
+      min-width: 200px;
+      flex: 1;
+      flex-shrink: 0;
+      overflow: hidden;
+      max-height: 100%;
+    }
+    .kanban-column-header {
+      padding: var(--space-2) var(--space-3);
+      border-bottom: 1px solid var(--bg-subtle);
+      background: var(--bg-elevated);
+      flex-shrink: 0;
+    }
+    .kanban-column-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      color: var(--text-primary);
+      text-transform: capitalize;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: var(--space-2);
+    }
+    .kanban-column-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 24px;
+      height: 24px;
+      background: var(--accent-subtle);
+      color: var(--accent);
+      border-radius: 50%;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+    .kanban-cards {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-1);
+      padding: var(--space-2);
+      flex: 1;
+      overflow-y: auto;
+      min-height: 60px;
+    }
+    .kanban-cards.drag-over {
+      background: rgba(99, 102, 241, 0.05);
+      border-radius: var(--radius-md);
+    }
+
+    /* Role Card */
+    .role-card {
+      background: var(--bg-base);
+      border: 1px solid var(--bg-elevated);
+      border-radius: var(--radius-md);
+      padding: var(--space-2);
+      cursor: grab;
+      transition: all 0.15s ease;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    .role-card:hover {
+      border-color: var(--accent);
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+    }
+    .role-card.dragging {
+      opacity: 0.5;
+      transform: scale(1.05);
+      cursor: grabbing;
+    }
+
+    /* Opaque/Confidential Roles */
+    .role-card[style*="border-style: dashed"] {
+      border: 2px dashed var(--text-tertiary);
+    }
+
+    .role-card-header {
+      display: flex;
+      gap: var(--space-1);
+      margin-bottom: var(--space-1);
+    }
+    .role-card-logo {
+      width: 40px;
+      height: 40px;
+      min-width: 40px;
+      border-radius: var(--radius-md);
+      background: var(--bg-elevated);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      font-weight: 700;
+      font-size: 0.85rem;
+      color: white;
+    }
+    .role-card-meta {
+      flex: 1;
+    }
+    .role-company {
+      font-size: 0.75rem;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+    .role-title {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: var(--space-1);
+      word-break: break-word;
+      line-height: 1.3;
+    }
+
+    .role-badges {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      margin-bottom: var(--space-2);
+    }
+    .role-badge {
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      border-radius: var(--radius-pill);
+      background: var(--bg-elevated);
+      color: var(--text-secondary);
+      font-weight: 500;
+      border: 1px solid transparent;
+    }
+    .role-badge.tier-hot { background: #fee2e2; color: #dc2626; border-color: #fca5a5; }
+    .role-badge.tier-active { background: #fef3c7; color: #d97706; border-color: #fcd34d; }
+    .role-badge.tier-watching { background: #e0e7ff; color: #4f46e5; border-color: #c7d2fe; }
+    .role-badge.tier-dormant { background: #e2e8f0; color: #475569; border-color: #cbd5e1; }
+
+    .role-stats {
+      display: flex;
+      gap: var(--space-2);
+      font-size: 0.75rem;
+      color: var(--text-tertiary);
+      flex-wrap: wrap;
+    }
+    .role-stat {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+    .comp-stat {
+      font-size: 0.7rem;
+      color: var(--success);
+      width: 100%;
+      margin-top: 2px;
+    }
+
+    .role-card-actions {
+      display: flex;
+      gap: var(--space-1);
+      margin-top: var(--space-2);
+      justify-content: flex-end;
+    }
+    .role-card-action {
+      padding: 4px 8px;
+      background: var(--bg-elevated);
+      border: none;
+      border-radius: 4px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 0.7rem;
+      transition: all 0.2s ease;
+    }
+    .role-card-action:hover {
+      background: var(--accent);
+      color: white;
+    }
+
+    /* Connection Cards */
+    .connection-card {
+      transition: all 0.2s ease;
+    }
+    .connection-card:hover {
+      box-shadow: var(--shadow-md);
+      transform: translateY(-1px);
+    }
+    .score-badge {
+      min-width: 40px;
+      text-align: center;
+      font-size: 0.9rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: var(--radius-pill);
+      font-size: 0.7rem;
+      white-space: nowrap;
+    }
+
+    /* Table View */
+    .table-view {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      overflow: hidden;
+    }
+    .table-wrapper {
+      flex: 1;
+      overflow: auto;
+    }
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    .table th {
+      background: var(--bg-elevated);
+      border-bottom: 1px solid var(--bg-subtle);
+      padding: var(--space-3);
+      text-align: left;
+      font-weight: 600;
+      color: var(--text-primary);
+      position: sticky;
+      top: 0;
+    }
+    .table th.sortable {
+      cursor: pointer;
+      user-select: none;
+    }
+    .table th.sortable:hover {
+      color: var(--accent);
+    }
+    .table td {
+      padding: var(--space-3);
+      border-bottom: 1px solid var(--bg-subtle);
+      color: var(--text-primary);
+    }
+    .table tbody tr:hover {
+      background: var(--bg-elevated);
+    }
+    .table tbody tr:hover td {
+      color: var(--accent);
+    }
+
+    /* Companies View */
+    .companies-view {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      overflow: hidden;
+    }
+    .companies-grid {
+      flex: 1;
+      overflow: auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: var(--space-4);
+      padding: var(--space-6);
+    }
+    .company-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-lg);
+      padding: var(--space-4);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .company-card:hover {
+      border-color: var(--accent);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      transform: translateY(-2px);
+    }
+    .company-card-header {
+      display: flex;
+      gap: var(--space-3);
+      margin-bottom: var(--space-3);
+    }
+    .company-card-logo {
+      width: 48px;
+      height: 48px;
+      border-radius: var(--radius-md);
+      background: var(--bg-elevated);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      font-weight: 700;
+      font-size: 1rem;
+      color: white;
+      flex-shrink: 0;
+    }
+    .company-card-info h3 {
+      margin: 0 0 2px 0;
+      font-size: 0.95rem;
+      color: var(--text-primary);
+    }
+    .company-card-info p {
+      margin: 0;
+      font-size: 0.8rem;
+      color: var(--text-tertiary);
+    }
+    .company-card-stats {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      padding-top: var(--space-2);
+      border-top: 1px solid var(--bg-subtle);
+    }
+
+    /* Modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      background: rgba(0,0,0,0.5);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      animation: fadeIn 0.2s ease;
+    }
+    .modal-overlay.active, .modal-overlay.open { display: flex; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+    .modal {
+      background: var(--bg-surface);
+      border-radius: var(--radius-lg);
+      max-width: 600px;
+      width: 90%;
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .modal-header {
+      padding: var(--space-6);
+      border-bottom: 1px solid var(--bg-subtle);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .modal-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin: 0;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 1.5rem;
+      cursor: pointer;
+      color: var(--text-secondary);
+      padding: 0;
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: var(--radius-md);
+      transition: 0.2s ease;
+    }
+    .modal-close:hover {
+      background: var(--bg-subtle);
+      color: var(--text-primary);
+    }
+    .modal-body {
+      padding: var(--space-6);
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-4);
+    }
+    .modal-footer {
+      padding: var(--space-6);
+      border-top: 1px solid var(--bg-subtle);
+      background: var(--bg-base);
+      display: flex;
+      gap: var(--space-4);
+      justify-content: flex-end;
+      flex-shrink: 0;
+    }
+
+    /* Form elements */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+    .form-label {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .form-input, .form-select, .form-textarea {
+      padding: var(--space-2) var(--space-3);
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-md);
+      background: var(--bg-base);
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 0.9rem;
+      transition: all 0.2s ease;
+    }
+    .form-input:focus, .form-select:focus, .form-textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+    }
+    .form-textarea {
+      resize: vertical;
+      min-height: 100px;
+    }
+
+    /* Buttons */
+    .btn {
+      padding: var(--space-2) var(--space-4);
+      border: none;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-weight: 600;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+      white-space: nowrap;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+    .btn-primary:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+    .btn-secondary {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      border: 1px solid var(--bg-subtle);
+    }
+    .btn-secondary:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-secondary);
+      border: none;
+    }
+    .btn-ghost:hover {
+      color: var(--accent);
+    }
+    .btn-icon {
+      width: 40px;
+      height: 40px;
+      padding: 0;
+      justify-content: center;
+    }
+
+    /* Detail Panel */
+    .detail-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 999;
+      background: rgba(0,0,0,0.2);
+      display: none;
+    }
+    .detail-overlay.active { display: block; }
+
+    .detail-panel {
+      position: fixed;
+      right: 0;
+      top: 0;
+      width: 400px;
+      height: 100vh;
+      background: var(--bg-surface);
+      border-left: 1px solid var(--bg-subtle);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+      z-index: 1000;
+      overflow-y: auto;
+      display: none;
+      flex-direction: column;
+      animation: slideInRight 0.3s ease-out;
+    }
+    .detail-panel.active { display: flex; }
+    @keyframes slideInRight { from { transform: translateX(400px); } to { transform: translateX(0); } }
+
+    .detail-header {
+      padding: var(--space-6);
+      border-bottom: 1px solid var(--bg-subtle);
+      background: var(--bg-base);
+      flex-shrink: 0;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+    .detail-header-info {
+      display: flex;
+      gap: var(--space-3);
+      flex: 1;
+    }
+    .detail-header-logo {
+      width: 48px;
+      height: 48px;
+      border-radius: var(--radius-md);
+      object-fit: contain;
+      background: var(--bg-elevated);
+    }
+    .detail-header-text {
+      flex: 1;
+    }
+    .detail-company {
+      font-size: 0.85rem;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .detail-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+    .detail-close {
+      background: none;
+      border: none;
+      font-size: 1.5rem;
+      cursor: pointer;
+      color: var(--text-secondary);
+      padding: 0;
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .detail-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: var(--space-6);
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-6);
+    }
+    .detail-section {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-3);
+    }
+    .detail-section-title {
+      font-weight: 700;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .detail-field {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-1);
+    }
+    .detail-field-label {
+      font-size: 0.8rem;
+      color: var(--text-tertiary);
+      font-weight: 500;
+    }
+    .detail-field-value {
+      font-size: 0.9rem;
+      color: var(--text-primary);
+      word-break: break-word;
+    }
+
+    .detail-footer {
+      padding: var(--space-6);
+      border-top: 1px solid var(--bg-subtle);
+      background: var(--bg-base);
+      flex-shrink: 0;
+      display: flex;
+      gap: var(--space-4);
+      flex-wrap: wrap;
+    }
+    .detail-footer-left { flex: 1; }
+    .detail-footer-right { display: flex; gap: var(--space-4); }
+    .detail-footer .btn { flex: 1; }
+
+    /* Toast */
+    .toast-container {
+      position: fixed;
+      bottom: var(--space-6);
+      right: var(--space-6);
+      z-index: 10001;
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+    .toast {
+      background: var(--bg-surface);
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-md);
+      padding: var(--space-3) var(--space-4);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      max-width: 300px;
+      animation: slideInUp 0.3s ease;
+    }
+    @keyframes slideInUp { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    .toast.success { border-left: 4px solid #10b981; }
+    .toast.error { border-left: 4px solid #ef4444; }
+    .toast.warning { border-left: 4px solid #f59e0b; }
+
+    /* Stage History Timeline */
+    .stage-history-timeline {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-3);
+    }
+    .stage-history-entry {
+      position: relative;
+      padding-left: var(--space-4);
+    }
+    .stage-history-dot {
+      position: absolute;
+      left: 0;
+      top: 6px;
+      width: 8px;
+      height: 8px;
+      background: var(--accent);
+      border-radius: 50%;
+      border: 2px solid var(--bg-surface);
+    }
+
+    /* Comms Log */
+    .comms-log-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+    .comms-log-entry {
+      padding: var(--space-2) var(--space-3);
+      background: var(--bg-base);
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-md);
+    }
+
+    /* Resumes Sent */
+    .resumes-sent-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+    .resume-sent-entry {
+      padding: var(--space-2) var(--space-3);
+      background: var(--bg-base);
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-md);
+    }
+
+    /* Badge extras */
+    .role-badges-extra {
+      display: flex;
+      gap: var(--space-1);
+      flex-wrap: wrap;
+      margin-bottom: var(--space-1);
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .toolbar {
+        flex-direction: column;
+        gap: var(--space-3);
+      }
+      .toolbar-search { flex: 1; width: 100%; }
+      .toolbar-controls { width: 100%; justify-content: space-between; }
+      .kanban-column { min-width: 280px; }
+      .detail-panel { width: 100%; }
+      .companies-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="nav-brand"><span>P</span>athfinder</div>
+    <div class="nav-links">
+      <a href="../dashboard/index.html">Dashboard</a>
+      <a href="../job-feed/index.html">Feed</a>
+      <a href="../pipeline/index.html" class="active">Pipeline</a>
+      <a href="../research-brief/index.html">Research</a>
+      <a href="../resume-tailor/index.html">Resume</a>
+    </div>
+    <div class="nav-right">
+      <button id="theme-toggle" class="btn btn-icon btn-ghost" title="Toggle theme" aria-label="Toggle between dark and light theme">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="5"></circle>
+          <line x1="12" y1="1" x2="12" y2="3"></line>
+          <line x1="12" y1="21" x2="12" y2="23"></line>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+          <line x1="1" y1="12" x2="3" y2="12"></line>
+          <line x1="21" y1="12" x2="23" y2="12"></line>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+        </svg>
+      </button>
+      <span class="nav-kbd">⌘K</span>
+    </div>
+  </nav>
+
+  <!-- Page -->
+  <main class="page" role="main">
+    <div class="page-header">
+      <h1 class="page-title">Pipeline</h1>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <div class="toolbar-search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"></circle>
+          <path d="m21 21-4.35-4.35"></path>
+        </svg>
+        <input type="text" id="search-input" placeholder="Search companies & roles..." aria-label="Search for roles by company name or job title">
+        <button id="semantic-toggle-btn" class="toolbar-button" style="font-size: 0.75rem; padding: 4px 8px; opacity: 0.6; transition: all 0.15s;" aria-label="Toggle semantic vector search" title="Semantic search uses AI to find similar roles">🧠 Semantic</button>
+      </div>
+
+      <div class="toolbar-filter" id="filters"></div>
+
+      <div class="toolbar-controls">
+        <select id="tier-filter" class="toolbar-button" aria-label="Filter jobs by tier">
+          <option value="">All Tiers</option>
+          <option value="hot">Hot</option>
+          <option value="active">Active</option>
+          <option value="watching">Watching</option>
+          <option value="dormant">Dormant</option>
+        </select>
+
+        <select id="stage-filter" class="toolbar-button" aria-label="Filter by stage">
+          <option value="">All Stages</option>
+          <option value="discovered">Discovered</option>
+          <option value="researching">Researching</option>
+          <option value="outreach">Outreach</option>
+          <option value="applied">Applied</option>
+          <option value="screen">Screen</option>
+          <option value="interviewing">Interviewing</option>
+          <option value="offer">Offer</option>
+          <option value="closed">Closed</option>
+        </select>
+
+        <button id="stale-filter-btn" class="toolbar-button" style="font-size: 0.85rem; opacity: 0.7;" aria-label="Toggle stale role filter (14+ days in stage)" title="Show only stale roles (14+ days)">⏳ Stale</button>
+
+        <select id="kanban-sort" class="toolbar-button" aria-label="Sort kanban cards">
+          <option value="score">Score</option>
+          <option value="dateAdded">Date Added</option>
+          <option value="lastActivity">Last Activity</option>
+          <option value="daysInStage">Days in Stage</option>
+        </select>
+
+        <div id="view-toggle" style="display: flex; gap: var(--space-2);">
+          <button id="view-toggle-kanban" class="toolbar-button active" title="Kanban board view" aria-label="View as kanban board">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="7" height="7"></rect>
+              <rect x="14" y="3" width="7" height="7"></rect>
+              <rect x="14" y="14" width="7" height="7"></rect>
+              <rect x="3" y="14" width="7" height="7"></rect>
+            </svg>
+            <span>Kanban</span>
+          </button>
+
+          <button id="view-toggle-table" class="toolbar-button" title="Table view" aria-label="View as table">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M8 6h12M8 12h12M8 18h12M3 6h.01M3 12h.01M3 18h.01"/>
+            </svg>
+            <span>Table</span>
+          </button>
+
+          <button id="view-toggle-companies" class="toolbar-button" title="Companies view" aria-label="View companies">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+              <polyline points="9 22 9 12 15 12 15 22"></polyline>
+            </svg>
+            <span>Companies</span>
+          </button>
+        </div>
+
+        <button id="export-btn" class="toolbar-button" title="Export to CSV" aria-label="Export roles to CSV">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          <span>Export</span>
+        </button>
+
+        <button id="add-role-btn" class="toolbar-button" style="background: var(--accent); color: white;" aria-label="Open dialog to add a new job role">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          <span>New Role</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Content Area -->
+    <div class="content-wrapper kanban-active">
+      <!-- Kanban View -->
+      <div class="kanban" id="kanban"></div>
+
+      <!-- Table View -->
+      <div class="table-view">
+        <div class="table-wrapper">
+          <table class="table" id="roles-table">
+            <thead>
+              <tr>
+                <th class="sortable" data-sort="company">Company</th>
+                <th class="sortable" data-sort="title">Role Title</th>
+                <th class="sortable" data-sort="positioning">Type</th>
+                <th class="sortable" data-sort="stage">Stage</th>
+                <th class="sortable" data-sort="tier">Tier</th>
+                <th class="sortable" data-sort="score">Score</th>
+                <th class="sortable" data-sort="days">Days</th>
+              </tr>
+            </thead>
+            <tbody id="table-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Companies View -->
+      <div class="companies-view">
+        <div class="companies-grid" id="companies-grid"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Add Role Modal -->
+  <div class="modal-overlay" id="add-role-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 class="modal-title">Add New Role</h2>
+        <button class="modal-close" id="modal-close" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="modal-body">
+        <!-- Confidential / Recruiter Outreach Toggle -->
+        <div class="form-group" style="margin-bottom: var(--space-4); padding-bottom: var(--space-4); border-bottom: 1px solid var(--bg-subtle);">
+          <div style="display: flex; align-items: center; gap: var(--space-2);">
+            <input type="checkbox" id="form-confidential-toggle" style="width: 18px; height: 18px; cursor: pointer;">
+            <label for="form-confidential-toggle" style="cursor: pointer; font-weight: 600; color: var(--text-primary); margin: 0;">Confidential / Recruiter Outreach</label>
+          </div>
+          <p style="margin: var(--space-2) 0 0 0; font-size: 0.85rem; color: var(--text-tertiary);">Enable for opaque roles where company and/or title are unknown</p>
+        </div>
+
+        <!-- Confidential Fields (hidden by default) -->
+        <div id="confidential-fields" style="display: none; margin-bottom: var(--space-4); padding: var(--space-4); background: var(--bg-elevated); border-radius: var(--radius-md); border: 1px solid var(--bg-subtle);">
+          <div style="margin-bottom: var(--space-3); padding-bottom: var(--space-3); border-bottom: 1px solid var(--bg-subtle);">
+            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: var(--space-2);">What's Unknown?</div>
+            <div style="display: flex; gap: var(--space-4); flex-wrap: wrap;">
+              <div style="display: flex; align-items: center; gap: var(--space-2);">
+                <input type="checkbox" id="form-company-unknown" style="width: 16px; height: 16px; cursor: pointer;">
+                <label for="form-company-unknown" style="cursor: pointer; color: var(--text-secondary);">Company unknown</label>
+              </div>
+              <div style="display: flex; align-items: center; gap: var(--space-2);">
+                <input type="checkbox" id="form-role-unknown" style="width: 16px; height: 16px; cursor: pointer;">
+                <label for="form-role-unknown" style="cursor: pointer; color: var(--text-secondary);">Role unknown</label>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-bottom: var(--space-3);">
+            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: var(--space-2);">Recruiter Info</div>
+            <div class="form-group">
+              <label class="form-label" style="font-size: 0.9rem;">Recruiter Name</label>
+              <input type="text" id="form-recruiter-name" class="form-input" placeholder="e.g., Jane Smith" aria-label="Name of the recruiter">
+            </div>
+            <div class="form-group">
+              <label class="form-label" style="font-size: 0.9rem;">Recruiter Firm</label>
+              <input type="text" id="form-recruiter-firm" class="form-input" placeholder="e.g., TechRecruiting Inc" aria-label="Name of the recruiting firm">
+            </div>
+            <div class="form-group">
+              <label class="form-label" style="font-size: 0.9rem;">Recruiter Email</label>
+              <input type="email" id="form-recruiter-email" class="form-input" placeholder="jane@techrecruiting.com" aria-label="Email address of the recruiter">
+            </div>
+            <div class="form-group">
+              <label class="form-label" style="font-size: 0.9rem;">First Contact Channel</label>
+              <select id="form-recruiter-channel" class="form-select" aria-label="How the recruiter first contacted you">
+                <option value="email">Email</option>
+                <option value="linkedin">LinkedIn</option>
+                <option value="call">Call</option>
+                <option value="text">Text/SMS</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+          </div>
+
+          <div style="margin-bottom: var(--space-3);">
+            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: var(--space-2);">Role Hints</div>
+            <div class="form-group">
+              <label class="form-label" style="font-size: 0.9rem;">Function (e.g., Product, Engineering, Sales)</label>
+              <input type="text" id="form-function-hint" class="form-input" placeholder="e.g., Product Manager" aria-label="Function or department of the role">
+            </div>
+            <div class="form-group">
+              <label class="form-label" style="font-size: 0.9rem;">Level (e.g., Senior, Staff, IC)</label>
+              <input type="text" id="form-level-hint" class="form-input" placeholder="e.g., Senior" aria-label="Seniority level of the role">
+            </div>
+            <div class="form-group">
+              <label class="form-label" style="font-size: 0.9rem;">Scope/Details</label>
+              <input type="text" id="form-scope-hint" class="form-input" placeholder="e.g., Series D AI company, remote" aria-label="Any details about the role scope">
+            </div>
+          </div>
+
+          <div>
+            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: var(--space-2);">Initial Context</div>
+            <div class="form-group">
+              <label class="form-label" style="font-size: 0.9rem;">Known Context</label>
+              <textarea id="form-known-context" class="form-textarea" placeholder="What do you know about this opportunity so far?" aria-label="Known context about the role" style="min-height: 60px;"></textarea>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Company Name</label>
+          <input type="text" id="form-company" class="form-input" placeholder="e.g., Stripe" aria-label="Enter company name">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Role Title</label>
+          <input type="text" id="form-title" class="form-input" placeholder="e.g., Senior Product Manager" aria-label="Enter the job title">
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4);">
+          <div class="form-group">
+            <label class="form-label">Positioning</label>
+            <select id="form-positioning" class="form-select">
+              <option value="ic">Individual Contributor</option>
+              <option value="management">Management</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Tier</label>
+            <select id="form-tier" class="form-select">
+              <option value="hot">Hot</option>
+              <option value="active">Active</option>
+              <option value="watching">Watching</option>
+              <option value="dormant">Dormant</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Current Stage</label>
+          <select id="form-stage" class="form-select">
+            <option value="discovered">Discovered</option>
+            <option value="researching">Researching</option>
+            <option value="outreach">Outreach</option>
+            <option value="applied">Applied</option>
+            <option value="screen">Screen</option>
+            <option value="interviewing">Interviewing</option>
+            <option value="offer">Offer</option>
+            <option value="closed">Closed</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Job Description</label>
+          <textarea id="form-jd" class="form-textarea" placeholder="Paste the job description here..." aria-label="Paste the full job description text"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Score (0-100)</label>
+          <input type="number" id="form-score" class="form-input" min="0" max="100" placeholder="e.g., 85" aria-label="Rate this role from 0-100">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Salary Range</label>
+          <input type="text" id="form-salary" class="form-input" placeholder="e.g., $150,000 - $200,000">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Location</label>
+          <input type="text" id="form-location" class="form-input" placeholder="e.g., San Francisco, CA / Remote">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">URL / Job Posting Link</label>
+          <input type="text" id="form-url" class="form-input" placeholder="https://...">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Source</label>
+          <input type="text" id="form-source" class="form-input" placeholder="e.g., LinkedIn, Referral, Job Board">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Notes</label>
+          <textarea id="form-notes" class="form-textarea" placeholder="Add any notes..." aria-label="Add notes about this role" style="min-height: 80px;"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="modal-cancel" class="btn btn-secondary" aria-label="Cancel and close this dialog without saving">Cancel</button>
+        <button id="modal-submit" class="btn btn-primary" aria-label="Save this new role to your pipeline">Add Role</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Detail Panel -->
+  <div class="detail-overlay" id="detail-overlay"></div>
+  <div class="detail-panel" id="detail-panel" role="dialog" aria-label="Role details">
+    <div class="detail-header">
+      <div class="detail-header-info">
+        <img src="" alt="" class="detail-header-logo" id="detail-header-logo" onerror="this.style.display='none'">
+        <div class="detail-header-text">
+          <div class="detail-company" id="detail-company"></div>
+          <div class="detail-title" id="detail-title"></div>
+        </div>
+      </div>
+      <button class="detail-close" id="detail-close" aria-label="Close detail panel">&times;</button>
+    </div>
+    <div class="detail-body" id="detail-body"></div>
+    <div class="detail-footer">
+      <div class="detail-footer-left">
+        <button class="btn btn-ghost" id="detail-delete" style="color: var(--status-rejected);">Delete</button>
+      </div>
+      <div class="detail-footer-right">
+        <button class="btn btn-ghost" id="detail-cancel">Cancel</button>
+        <button class="btn btn-primary" id="detail-save">Save Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container" role="alert" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- Shared modules -->
+  <script src="../shared/data-layer.js?v=3.10.1"></script>
+  <script src="../shared/mcp-client.js?v=3.10.1"></script>
+  <script src="../shared/components.js?v=3.10.1"></script>
+  <script src="../shared/logos.js?v=3.10.1"></script>
+  <script src="../shared/pipeline-logic.js?v=3.10.1"></script>
+  <script src="../shared/text-utils.js?v=3.10.1"></script>
+  <script src="../shared/comp-utils.js?v=3.10.1"></script>
+  <script src="../shared/command-palette.js?v=3.10.1"></script>
+  <script src="./pipeline.js?v=3.9.1"></script>
+</body>
+</html>

@@ -1,0 +1,1234 @@
+/**
+ * ============================================================
+ * PATHFINDER DESIGN SYSTEM — pathfinder.css
+ * Version: 1.0 | March 2026
+ * ============================================================
+ *
+ * A "design system" is like a rulebook for how things should look
+ * and behave in our application. Instead of each page deciding its
+ * own colors, spacing, and animations, we define them all in one
+ * place. This file is that central rulebook.
+ *
+ * Think of it like a house style guide: if you're designing a room,
+ * you consult this guide to see what wall colors are allowed, how
+ * big the furniture should be, what the light fixtures look like, etc.
+ * That way, every room in the house feels like it belongs together.
+ *
+ * Load this file FIRST, before any module-specific styles, so that
+ * all other CSS files can use these rules as their foundation.
+ * ============================================================
+ */
+
+
+/* ============================================================
+   RESET
+
+   Browsers come with built-in styling for all HTML elements.
+   We need to "reset" these defaults so we have a clean slate
+   and consistent behavior across different browsers (Chrome,
+   Firefox, Safari, etc.).
+   ============================================================ */
+
+*, *::before, *::after {
+  /* box-sizing: border-box means padding and borders are included
+     in the element's total size, making math much easier */
+  box-sizing: border-box;
+  /* Remove default margins and padding that browsers add */
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  /* When you click a link to jump to a section, smoothly scroll
+     instead of jumping instantly */
+  scroll-behavior: smooth;
+  /* Antialiasing makes text look smoother and less jagged on screens */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  /* Use the "Geist Sans" font family (a clean, modern typeface).
+     The list after it are fallbacks if Geist Sans isn't available,
+     ordered by what's most likely to be on a user's computer */
+  font-family: 'Geist Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+
+/* Remove default link styling (underline, color) */
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Make buttons look and behave consistently */
+button {
+  cursor: pointer;
+  font: inherit;
+  border: none;
+  background: none;
+}
+
+/* Make form inputs use our chosen font instead of monospace defaults */
+input, select, textarea {
+  font: inherit;
+}
+
+/* Make tables not have double borders where cells meet */
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+/* Make images responsive: they never wider than their container,
+   and display as block elements (not inline) */
+img {
+  max-width: 100%;
+  display: block;
+}
+
+
+/* ============================================================
+   DESIGN TOKENS — The Color & Style Palette
+
+   "Tokens" are named values that we reuse everywhere.
+   Instead of hardcoding "the dark gray background" as #18181b
+   in 50 different places, we define it once as --bg-surface
+   and reference that name everywhere. If we ever want to change it,
+   we only change it here, and all 50 places update automatically.
+   ============================================================ */
+
+:root {
+  /* -------- BACKGROUND LAYERS --------
+     Websites often have multiple layers (a page background, lighter cards on top,
+     even lighter popovers on top of that). These colors create that depth.
+     LIGHT MODE is the default (v3.3.1). Dark mode available via user toggle. */
+
+  --bg-base:        #ffffff;   /* Pure white page background */
+  --bg-surface:     #f4f4f5;   /* Light gray for cards and panels */
+  --bg-elevated:    #e4e4e7;   /* Slightly darker gray for elevated elements */
+  --bg-subtle:      #d4d4d8;   /* Medium gray for borders and accents */
+
+  /* -------- TEXT COLORS --------
+     Three levels: primary (main text that's easy to read),
+     secondary (labels, hints), tertiary (barely noticeable, very dim).
+     This helps create a visual hierarchy so users know what's important. */
+
+  --text-primary:   #09090b;   /* Near-black; for all main content */
+  --text-secondary: #52525b;   /* Medium gray; for labels and secondary info */
+  --text-tertiary:  #a1a1aa;   /* Light gray; for hints and very minor text */
+
+  /* -------- ACCENT COLOR --------
+     This is the "brand" color used for buttons, links, and interactive elements.
+     We keep it bright and noticeable so users can easily spot clickable things. */
+
+  --accent:         #6366f1;   /* A nice purple-blue; the main interactive color */
+  --accent-hover:   #818cf8;   /* Lighter version that appears when you hover over accent elements */
+  --accent-subtle:  rgba(99, 102, 241, 0.15);  /* Very faint purple wash; used for backgrounds */
+
+  /* -------- STATUS COLORS --------
+     Green for success ("great!"), yellow for warning ("be careful"),
+     red for danger ("oh no"), blue for info ("here's some information").
+     These are universal meanings that users intuitively understand. */
+
+  --success:        #22c55e;   /* Green; means something good happened */
+  --warning:        #eab308;   /* Yellow; means pay attention to this */
+  --danger:         #ef4444;   /* Red; means something is wrong or risky */
+  --info:           #3b82f6;   /* Blue; means this is informational */
+
+  /* -------- TIER COLORS --------
+     In a job search, you rank companies into "tiers" (hot companies you love,
+     active companies you're pursuing, watching companies, dormant companies you've given up on).
+     Each tier gets a distinct color so you can visually scan your list. */
+
+  --tier-hot:       #ef4444;   /* Red/hot; your top priorities */
+  --tier-active:    var(--accent);    /* Active pursuit; using the purple accent */
+  --tier-watching:  #71717a;   /* Gray; you're keeping an eye on these */
+  --tier-dormant:   #3f3f46;   /* Very dark gray; you're not actively pursuing these */
+
+  /* -------- STAGE COLORS --------
+     As you progress through the job search funnel (discovering companies,
+     researching them, applying, interviewing), colors track where you are.
+     Gray for "just found it" → blue for "learning about it" → yellow for
+     "interviewing now" → green for "offer!". This creates a visual journey. */
+
+  --stage-discovered:   #64748b;   /* Gray; found this company but don't know much yet */
+  --stage-researching:  #38bdf8;   /* Light blue; actively learning about the company */
+  --stage-outreach:     #3b82f6;   /* Blue; reaching out to connections */
+  --stage-applied:      var(--accent);      /* Purple; application sent */
+  --stage-screen:       #8b5cf6;   /* Dark purple; passed initial screening */
+  --stage-interviewing: #f59e0b;   /* Orange/warm; in the interview process */
+  --stage-offer:        #10b981;   /* Green; offer received! */
+  --stage-closed:       #52525b;   /* Gray; role filled or you declined */
+
+  /* -------- TYPOGRAPHY --------
+     We use two fonts: Inter (friendly, readable sans-serif for content)
+     and JetBrains Mono (a monospace font for technical code or data). */
+
+  --font-sans:  'Geist Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono:  'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+
+  /* -------- TEXT SIZES --------
+     A consistent set of sizes from tiny (11px for captions) to huge (33px for main headings).
+     We use ratios (each size is about 20% bigger than the last) so they look harmonious together.
+     The pixel values in comments are approximate; the rem values are what CSS actually uses. */
+
+  --text-xs:    0.694rem;   /* ~11px; tiny labels, captions */
+  --text-sm:    0.833rem;   /* ~13px; small text, secondary content */
+  --text-base:  1rem;       /* ~16px; normal body text, default size */
+  --text-lg:    1.2rem;     /* ~19px; large text, subsection headings */
+  --text-xl:    1.44rem;    /* ~23px; section headings */
+  --text-2xl:   1.728rem;   /* ~28px; page titles */
+  --text-3xl:   2.074rem;   /* ~33px; main headings */
+
+  /* -------- SPACING --------
+     Every distance between elements (padding inside, gaps between items, margins)
+     is a multiple of 0.25rem (4px). This makes everything align to an invisible grid,
+     creating a clean, organized look. e.g., --space-4 (1rem = 16px) is our standard spacing unit. */
+
+  --space-1:  0.25rem;   /* 4px; tiny gaps */
+  --space-2:  0.5rem;    /* 8px; small gaps */
+  --space-3:  0.75rem;   /* 12px; medium gaps */
+  --space-4:  1rem;      /* 16px; standard spacing (most common) */
+  --space-5:  1.25rem;   /* 20px; generous spacing */
+  --space-6:  1.5rem;    /* 24px; large spacing */
+  --space-8:  2rem;      /* 32px; very large spacing */
+  --space-10: 2.5rem;    /* 40px; huge spacing */
+  --space-12: 3rem;      /* 48px; massive spacing */
+  --space-16: 4rem;      /* 64px; enormous spacing */
+
+  /* -------- SHADOWS --------
+     Shadows make elements look like they're floating above the page (elevation).
+     Small shadow = slightly raised. Big shadow = hovering high.
+     The glow is a special effect: a thin colored outline + a blurry glow underneath. */
+
+  --shadow-sm:   0 1px 2px rgba(0, 0, 0, 0.06);        /* Subtle shadow; barely noticeable */
+  --shadow-md:   0 4px 12px rgba(0, 0, 0, 0.08);      /* Medium shadow; used on hover */
+  --shadow-lg:   0 8px 24px rgba(0, 0, 0, 0.12);      /* Large shadow; for popups and modals */
+  --shadow-glow: 0 0 0 1px var(--accent), 0 0 12px var(--accent-subtle);  /* Glowing outline effect when selected */
+
+  /* -------- BORDER RADIUS --------
+     How rounded the corners of boxes should be.
+     Small (4px) for buttons and inputs; pill-shaped (9999px) for badges and pills. */
+
+  --radius-sm:   4px;      /* Slightly rounded corners */
+  --radius-md:   6px;      /* Medium rounding; cards and panels */
+  --radius-lg:   8px;      /* Large rounding; modals and major UI */
+  --radius-pill: 9999px;   /* Completely pill-shaped (round on both ends) */
+
+  /* -------- MOTION/ANIMATION --------
+     How long things take to animate and how they move.
+     Fast (100ms) for small changes like hover effects.
+     Normal (200ms) for typical transitions.
+     Slow (300ms) for more noticeable changes.
+     Ease functions describe the motion curve (straight, bouncy, etc.). */
+
+  --duration-fast:   100ms;    /* Quick animations; UI feedback */
+  --duration-normal: 200ms;    /* Standard animations; page transitions */
+  --duration-slow:   300ms;    /* Slower animations; focus the user's attention */
+  --duration-enter:  250ms;    /* Animation when something appears (open a modal) */
+  --duration-exit:   200ms;    /* Animation when something disappears (close a modal) */
+
+  /* Easing functions describe the motion style:
+     - default: natural, bouncy easing (feels smooth and modern)
+     - in: easing that moves slowly at first then speeds up
+     - bounce: extra bouncy easing (overshoots a bit, then settles) */
+  --ease-default:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in:         cubic-bezier(0.55, 0, 1, 0.45);
+  --ease-bounce:     cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* -------- LAYOUT --------
+     Maximum page width and standard component sizes. */
+
+  --content-max:   1280px;    /* Pages never get wider than this (so they don't look stretched on huge monitors) */
+  --sidebar-width: 320px;     /* The left or right sidebar width */
+  --nav-height:    56px;      /* Height of the top navigation bar */
+}
+
+
+/* ============================================================
+   DARK MODE
+
+   By default, we're in light mode (white backgrounds, dark text).
+   When the user toggles to dark mode (setting data-theme="dark"
+   on the <html> element), we override to dark values.
+   ============================================================ */
+
+[data-theme="dark"] {
+  /* Dark mode: dark backgrounds, light text, heavier shadows */
+  --bg-base:       #09090b;     /* Very dark page background */
+  --bg-surface:    #18181b;     /* Cards and panels */
+  --bg-elevated:   #27272a;     /* Elevated elements (dropdowns, etc.) */
+  --bg-subtle:     #3f3f46;     /* Borders and accents */
+  --text-primary:  #fafafa;     /* Bright white text */
+  --text-secondary:#a1a1aa;     /* Medium gray for labels */
+  --text-tertiary: #71717a;     /* Dim gray for hints */
+  /* Heavier shadows in dark mode to maintain depth perception */
+  --shadow-sm:   0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md:   0 4px 12px rgba(0, 0, 0, 0.25);
+  --shadow-lg:   0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+
+/* ============================================================
+   BASE STYLES
+
+   Default styling for the entire page.
+   ============================================================ */
+
+body {
+  background: var(--bg-base);      /* Use the base background (light by default) */
+  color: var(--text-primary);      /* Main text color */
+  font-size: var(--text-base);     /* Normal-sized text (16px) */
+  line-height: 1.6;                /* Space between lines; makes text readable */
+  min-height: 100vh;               /* Page is at least as tall as the viewport (full screen) */
+}
+
+
+/* ============================================================
+   TYPOGRAPHY
+
+   Styles for headings and text variations.
+   ============================================================ */
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;               /* Make headings bold */
+  line-height: 1.3;               /* Tight line spacing for headings (they're big, so spacing is tight) */
+  letter-spacing: -0.02em;        /* Slightly squeeze letters together for a more polished look */
+}
+
+h1 {
+  font-size: var(--text-2xl);
+  font-weight: 700;               /* Even bolder than other headings */
+  letter-spacing: -0.03em;        /* Even tighter letter spacing */
+}
+
+h2 { font-size: var(--text-xl); }
+h3 { font-size: var(--text-lg); }
+
+/* Monospace class: makes text use the monospace font (for code snippets, IDs, etc.) */
+.mono { font-family: var(--font-mono); }
+
+/* Text color variants: primary (normal), secondary (dimmer), tertiary (very dim) */
+.text-secondary { color: var(--text-secondary); }
+.text-tertiary { color: var(--text-tertiary); }
+
+/* Text size variants: use these classes to change size without changing the HTML tag */
+.text-xs { font-size: var(--text-xs); }
+.text-sm { font-size: var(--text-sm); }
+
+
+/* ============================================================
+   NAVIGATION BAR
+
+   The fixed bar at the top of the page. It stays visible when
+   you scroll, so navigation is always accessible.
+   ============================================================ */
+
+.nav {
+  position: fixed;                   /* Stays in place while you scroll */
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--nav-height);         /* 56px tall */
+  background: var(--bg-surface);     /* Slightly elevated background */
+  border-bottom: 1px solid var(--bg-subtle);  /* Subtle line separating it from content below */
+  display: flex;                     /* Arrange items in a row */
+  align-items: center;               /* Vertically center items */
+  padding: 0 var(--space-6);         /* Space on left and right */
+  z-index: 100;                      /* Sit on top of all other content */
+  /* Frosted glass effect: makes the background blurry, creating a sense of depth.
+     Looks like you're looking at the content below through frosted glass. */
+  backdrop-filter: blur(8px);
+}
+
+.nav-brand {
+  font-size: var(--text-lg);
+  font-weight: 700;                  /* Bold logo text */
+  color: var(--text-primary);
+  margin-right: var(--space-8);      /* Space between logo and navigation links */
+  letter-spacing: -0.03em;           /* Tight letter spacing for polish */
+}
+
+.nav-brand span { color: var(--accent); }  /* Make one part of the logo the accent color */
+
+.nav-links {
+  display: flex;                     /* Arrange links in a row */
+  gap: var(--space-1);               /* Small gap between each link */
+  list-style: none;                  /* Remove bullet points */
+  flex: 1;                           /* Take available space between brand and right section */
+  overflow-x: auto;                  /* Scroll horizontally if links overflow */
+  white-space: nowrap;               /* Prevent links from wrapping */
+}
+
+.nav-links a {
+  display: flex;
+  align-items: center;               /* Center icon and text vertically */
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);  /* Padding inside each link */
+  border-radius: var(--radius-sm);   /* Slightly rounded background */
+  font-size: var(--text-sm);
+  color: var(--text-secondary);      /* Dimmer color by default */
+  white-space: nowrap;               /* Keep link text on one line */
+  flex-shrink: 0;                    /* Don't compress links */
+  /* Smooth animation when colors change or background appears on hover/active */
+  transition: color var(--duration-fast) var(--ease-default),
+              background var(--duration-fast) var(--ease-default);
+}
+
+/* When you hover over a link, make it brighter and add a background */
+.nav-links a:hover {
+  color: var(--text-primary);        /* Bright white */
+  background: var(--bg-elevated);    /* Slightly elevated background appears */
+}
+
+/* When a link is the current page (active), highlight it with accent color */
+.nav-links a.active {
+  color: var(--accent);              /* Accent color */
+  background: var(--accent-subtle);  /* Faint accent background */
+}
+
+.nav-right {
+  margin-left: auto;                 /* Push this section to the right */
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* Keyboard shortcut display (e.g., "Cmd + K" for opening search) */
+.nav-kbd {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);     /* Monospace for keyboard keys */
+  color: var(--text-tertiary);       /* Dim gray */
+  background: var(--bg-elevated);    /* Slight background */
+  border-radius: var(--radius-sm);
+}
+
+/* Since the nav is fixed, we need to push page content down so it's not hidden behind the nav */
+.page { padding-top: calc(var(--nav-height) + var(--space-6)); padding-bottom: var(--space-8); }
+
+
+/* ============================================================
+   BUTTONS
+
+   Clickable elements in various styles and sizes.
+   ============================================================ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;               /* Vertically center icon and text */
+  justify-content: center;           /* Horizontally center them */
+  gap: var(--space-2);               /* Space between icon and text */
+  padding: var(--space-2) var(--space-4);  /* Internal padding */
+  border-radius: var(--radius-sm);   /* Slightly rounded corners */
+  font-size: var(--text-sm);
+  font-weight: 500;                  /* Slightly bold */
+  transition: all var(--duration-fast) var(--ease-default);  /* Smooth animation on hover */
+  min-height: 36px;                  /* Minimum height (about thumb-sized for touchscreens) */
+  white-space: nowrap;               /* Keep text on one line */
+}
+
+/* PRIMARY BUTTON: The main action button (blue/accent color, white text) */
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover { background: var(--accent-hover); }  /* Lighter on hover */
+
+/* SECONDARY BUTTON: Less important action (outline style, accent color text) */
+.btn-secondary {
+  background: transparent;           /* No fill */
+  color: var(--accent);              /* Text is accent color */
+  border: 1px solid var(--accent);   /* Outlined border */
+}
+.btn-secondary:hover { background: var(--accent-subtle); }  /* Faint background on hover */
+
+/* GHOST BUTTON: Subtle button (text only, no border or background) */
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);      /* Dimmer text */
+}
+.btn-ghost:hover {
+  color: var(--text-primary);        /* Brighter on hover */
+  background: var(--bg-elevated);    /* Subtle background appears */
+}
+
+/* DANGER BUTTON: Red, for destructive actions (delete, cancel, etc.) */
+.btn-danger {
+  background: var(--danger);         /* Red background */
+  color: #fff;
+}
+.btn-danger:hover { opacity: 0.9; }  /* Slightly fade on hover */
+
+/* SMALL BUTTON: Compact version for tight spaces */
+.btn-sm {
+  padding: var(--space-1) var(--space-3);
+  min-height: 28px;                  /* Shorter than normal */
+  font-size: var(--text-xs);         /* Smaller text */
+}
+
+/* ICON BUTTON: Square button for icon-only actions (no text) */
+.btn-icon {
+  width: 36px;
+  height: 36px;
+  padding: 0;                        /* Icon is centered, no padding needed */
+  border-radius: var(--radius-sm);
+}
+
+
+/* ============================================================
+   BADGES
+
+   Small labels or tags used to categorize or label items.
+   ============================================================ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);       /* Tight padding */
+  border-radius: var(--radius-pill); /* Fully rounded (pill shape) */
+  font-size: var(--text-xs);         /* Small text */
+  font-weight: 500;                  /* Slightly bold */
+  line-height: 1.4;
+  white-space: nowrap;               /* Don't wrap to multiple lines */
+}
+
+/* FILLED BADGE: Solid background, white text */
+.badge-filled { color: #fff; }
+
+/* OUTLINED BADGE: Transparent background, colored border, colored text */
+.badge-outlined { background: transparent; border: 1px solid; }
+
+/* GHOST BADGE: Subtle background, secondary text color */
+.badge-ghost { background: var(--bg-elevated); color: var(--text-secondary); }
+
+/* -------- STAGE BADGES --------
+   Each job application stage gets its own color (see stage colors defined earlier).
+   Some stages get black text (researching, interviewing) because their backgrounds are bright. */
+
+.badge-discovered   { background: var(--stage-discovered); }
+.badge-researching  { background: var(--stage-researching); color: #000; }  /* Black text on light blue background */
+.badge-outreach     { background: var(--stage-outreach); }
+.badge-applied      { background: var(--stage-applied); }
+.badge-screen       { background: var(--stage-screen); }
+.badge-interviewing { background: var(--stage-interviewing); color: #000; }  /* Black text on orange background */
+.badge-offer        { background: var(--stage-offer); }
+.badge-closed       { background: var(--stage-closed); }
+
+/* -------- TIER BADGES --------
+   Each company tier gets its own color (hot, active, watching, dormant). */
+
+.badge-hot      { background: var(--tier-hot); }
+.badge-active   { background: var(--tier-active); }
+.badge-watching { background: var(--tier-watching); }
+.badge-dormant  { background: var(--tier-dormant); color: var(--text-secondary); }  /* Dim text on dark background */
+
+/* -------- POSITION TYPE BADGES --------
+   IC = Individual Contributor (non-management role)
+   MGMT = Management role */
+
+.badge-ic   { border-color: var(--info); color: var(--info); background: transparent; }      /* Blue outlined */
+.badge-mgmt { border-color: var(--stage-screen); color: var(--stage-screen); background: transparent; }  /* Purple outlined */
+
+
+/* ============================================================
+   CARDS
+
+   Rectangular containers that hold information and content.
+   Used for individual companies, roles, etc.
+   ============================================================ */
+
+.card {
+  background: var(--bg-surface);     /* Lighter background than the page */
+  border-radius: var(--radius-md);   /* Medium rounded corners */
+  box-shadow: var(--shadow-sm);      /* Subtle shadow = slightly raised */
+  padding: var(--space-4);
+  /* Smooth animation when hovering; both the lift and shadow change */
+  transition: transform var(--duration-fast) var(--ease-default),
+              box-shadow var(--duration-fast) var(--ease-default);
+}
+
+/* On hover, cards lift up (translateY = move up) and get a bigger shadow */
+.card:hover {
+  transform: translateY(-2px);       /* Move up 2 pixels */
+  box-shadow: var(--shadow-md);      /* Bigger shadow = feels higher */
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;    /* Title on left, actions on right */
+  margin-bottom: var(--space-3);
+}
+
+.card-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.card-subtitle {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* Metadata row (e.g., date, location, salary) */
+.card-meta {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;                   /* Wrap to multiple lines if needed */
+  margin-bottom: var(--space-3);
+}
+
+.card-meta-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);       /* Very dim */
+}
+
+/* Action buttons at the bottom of a card */
+.card-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--bg-subtle);  /* Divider line */
+}
+
+
+/* ============================================================
+   KANBAN BOARD
+
+   A "kanban board" is a visual tool where you organize cards into
+   columns by status (like "To Do", "In Progress", "Done").
+   Perfect for a job search pipeline.
+   ============================================================ */
+
+.kanban {
+  display: flex;                     /* Arrange columns in a row */
+  gap: var(--space-4);               /* Space between columns */
+  padding: 0 var(--space-6);
+  overflow-x: auto;                  /* Scroll horizontally on small screens */
+  /* Height set by module CSS — no min-height here to avoid overflow */
+}
+
+.kanban-column {
+  flex: 1 0 180px;                   /* Columns flex to fill, min 180px */
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;            /* Stack items vertically */
+}
+
+.kanban-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-2);
+  margin-bottom: var(--space-3);
+  position: sticky;                  /* Header stays at top when you scroll within the column */
+  top: 0;
+}
+
+.kanban-header h3 {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;         /* Make text UPPERCASE */
+  letter-spacing: 0.05em;            /* Spread letters out; formal look */
+}
+
+/* Bubble showing the number of items in this column (e.g., "12") */
+.kanban-count {
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);     /* Monospace for numbers */
+  color: var(--text-tertiary);
+  background: var(--bg-elevated);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill); /* Pill-shaped */
+}
+
+/* Container for all cards in a column */
+.kanban-cards {
+  display: flex;
+  flex-direction: column;            /* Stack cards vertically */
+  gap: var(--space-3);               /* Space between each card */
+  flex: 1;                           /* Fill remaining space */
+  padding-bottom: var(--space-8);    /* Extra space at the bottom for scrolling */
+}
+
+
+/* ============================================================
+   ROLE CARD (Job Position Card)
+
+   A specialized card type for displaying individual job postings/roles.
+   Includes company logo, title, badges, and action buttons.
+   ============================================================ */
+
+.role-card {
+  background: var(--bg-surface);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-3);
+  cursor: pointer;                   /* Show that it's clickable */
+  border-left: 3px solid transparent;  /* Thick left border (will turn accent color when selected) */
+  transition: transform var(--duration-fast) var(--ease-default),
+              box-shadow var(--duration-fast) var(--ease-default),
+              border-color var(--duration-fast) var(--ease-default);  /* Animate all three properties */
+}
+
+.role-card:hover {
+  transform: translateY(-2px);       /* Lift up slightly */
+  box-shadow: var(--shadow-md);      /* Bigger shadow */
+}
+
+/* When a card is selected, highlight it with accent color and glow */
+.role-card.selected {
+  border-left-color: var(--accent);  /* Left border turns purple */
+  box-shadow: var(--shadow-glow);    /* Glowing outline effect */
+}
+
+/* Company logo and name area */
+.role-card-company {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+
+.role-card-logo {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  object-fit: contain;               /* Fit image inside without stretching */
+  background: var(--bg-elevated);    /* Subtle background */
+}
+
+.role-card-company-name {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Job title (e.g., "Senior Software Engineer") */
+.role-card-title {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: var(--space-2);
+  line-height: 1.4;                 /* Good spacing for multi-line titles */
+}
+
+/* Badges (stage, tier, position type) */
+.role-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+/* Bottom row with metadata (days since discovered, last action, etc.) */
+.role-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.role-card-days {
+  font-family: var(--font-mono);     /* Monospace for numbers */
+}
+
+
+/* ============================================================
+   FORMS
+
+   Input fields, textareas, and form controls.
+   ============================================================ */
+
+.input {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-base);        /* Darker background than surroundings */
+  color: var(--text-primary);
+  border: 1px solid var(--bg-subtle);  /* Subtle border */
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  /* Smooth animation when focused (border color and glow) */
+  transition: border-color var(--duration-fast) var(--ease-default),
+              box-shadow var(--duration-fast) var(--ease-default);
+}
+
+/* When you click in an input (focus), highlight it */
+.input:focus {
+  outline: none;                     /* Remove browser's default outline */
+  border-color: var(--accent);       /* Border turns accent color */
+  box-shadow: 0 0 0 3px var(--accent-subtle);  /* Glowing halo around the input */
+}
+
+.input::placeholder { color: var(--text-tertiary); }  /* Placeholder text is very dim */
+
+/* Dropdown select element */
+.select {
+  appearance: none;                  /* Remove browser's default dropdown styling */
+  /* Add a custom dropdown arrow icon (SVG) */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;  /* Position arrow on the right */
+  padding-right: 28px;               /* Make room for the arrow */
+}
+
+/* Textarea (multi-line input) */
+textarea.input {
+  resize: vertical;                  /* Only allow resizing height, not width */
+  min-height: 80px;                  /* At least 5 lines tall */
+  line-height: 1.5;
+}
+
+/* Form group: a label + input pair */
+.form-group {
+  display: flex;
+  flex-direction: column;            /* Stack label above input */
+  gap: var(--space-1);
+}
+
+.form-label {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;         /* Make labels UPPERCASE and small */
+  letter-spacing: 0.05em;
+}
+
+
+/* ============================================================
+   MODAL (Popup Dialog)
+
+   A dialog box that floats on top of the page, darkening the background.
+   Used for alerts, forms, confirmations, etc.
+   ============================================================ */
+
+.modal-overlay {
+  position: fixed;                   /* Cover the entire screen */
+  inset: 0;                          /* Shorthand for top: 0, right: 0, bottom: 0, left: 0 */
+  /* Semi-transparent black that darkens the background */
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;               /* Center modal vertically */
+  justify-content: center;           /* Center modal horizontally */
+  z-index: 200;
+  opacity: 0;                        /* Hidden by default */
+  pointer-events: none;              /* Don't respond to clicks when hidden */
+  transition: opacity var(--duration-normal) var(--ease-default);  /* Fade in/out */
+}
+
+.modal-overlay.open {
+  opacity: 1;                        /* Visible */
+  pointer-events: auto;              /* Respond to clicks */
+}
+
+.modal {
+  background: var(--bg-elevated);    /* Elevated background (lighter than page) */
+  border-radius: var(--radius-lg);   /* Large rounded corners */
+  box-shadow: var(--shadow-lg);      /* Big shadow = feels very elevated */
+  width: 90%;                        /* 90% of screen width */
+  max-width: 560px;                  /* Cap at 560px (max content width) */
+  max-height: 85vh;                  /* Cap at 85% of viewport height */
+  overflow-y: auto;                  /* Scroll if content is too tall */
+  padding: var(--space-6);
+  /* Animation: starts slightly lower, slides up when opening */
+  transform: translateY(8px);
+  transition: transform var(--duration-enter) var(--ease-default);
+}
+
+.modal-overlay.open .modal { transform: translateY(0); }  /* Slide to final position */
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;    /* Title on left, close button on right */
+  margin-bottom: var(--space-5);
+}
+
+.modal-title { font-size: var(--text-lg); font-weight: 600; }
+
+.modal-body { display: flex; flex-direction: column; gap: var(--space-4); }  /* Stack content */
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;         /* Buttons aligned to the right */
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--bg-subtle);  /* Divider line */
+}
+
+
+/* ============================================================
+   TABLES
+
+   Structured data in rows and columns.
+   ============================================================ */
+
+.table { width: 100%; }
+
+.table th {
+  text-align: left;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;         /* Column headers are UPPERCASE */
+  letter-spacing: 0.05em;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--bg-subtle);  /* Line below headers */
+  position: sticky;                  /* Headers stick to top when scrolling */
+  top: 0;
+  background: var(--bg-base);        /* Headers use base background so they don't scroll away */
+}
+
+.table td {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  border-bottom: 1px solid var(--bg-subtle);  /* Line between rows */
+  vertical-align: middle;            /* Align content to the middle */
+}
+
+.table tr:hover td { background: var(--bg-surface); }  /* Highlight row on hover */
+
+
+/* ============================================================
+   SCORE BAR
+
+   A thin horizontal progress bar (e.g., showing match percentage).
+   ============================================================ */
+
+.score-bar {
+  height: 6px;                       /* Very thin bar */
+  background: var(--bg-subtle);      /* Gray background track */
+  border-radius: var(--radius-pill); /* Pill-shaped (rounded ends) */
+  overflow: hidden;                  /* Content inside doesn't overflow */
+  position: relative;
+}
+
+.score-bar-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  /* Uses bouncy easing for a fun fill animation (feels lively) */
+  transition: width 400ms var(--ease-bounce);
+}
+
+
+/* ============================================================
+   TOAST (Notification)
+
+   Small notification messages that appear in the corner.
+   (e.g., "Saved!" or "Error: Could not delete").
+   ============================================================ */
+
+.toast-container {
+  position: fixed;                   /* Fixed to viewport */
+  bottom: var(--space-6);            /* 24px from bottom */
+  right: var(--space-6);             /* 24px from right */
+  z-index: 300;
+  display: flex;
+  flex-direction: column;            /* Stack toasts vertically */
+  gap: var(--space-2);
+}
+
+.toast {
+  background: var(--bg-elevated);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);      /* Medium shadow */
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  align-items: center;               /* Icon and text side-by-side */
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  min-width: 280px;                  /* Minimum width */
+  max-width: 400px;
+  border-left: 3px solid var(--info);  /* Blue left border by default (info) */
+  /* Slide up and fade in when appearing */
+  animation: toast-in var(--duration-enter) var(--ease-default);
+}
+
+.toast-success { border-left-color: var(--success); }  /* Green for success */
+.toast-error   { border-left-color: var(--danger); }   /* Red for error */
+.toast-warning { border-left-color: var(--warning); }  /* Yellow for warning */
+
+/* Animation for toasts sliding up and fading in */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(16px); }    /* Start low and invisible */
+  to   { opacity: 1; transform: translateY(0); }       /* End high and visible */
+}
+
+
+/* ============================================================
+   EMPTY STATE
+
+   Message shown when there's no data (e.g., "No jobs found").
+   ============================================================ */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;            /* Stack vertically */
+  align-items: center;               /* Center horizontally */
+  justify-content: center;           /* Center vertically */
+  text-align: center;
+  padding: var(--space-16) var(--space-6);  /* Lots of padding */
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.empty-state-icon {
+  font-size: 48px;                   /* Large emoji or icon */
+  margin-bottom: var(--space-4);
+  opacity: 0.3;                      /* Make it very dim (not distacting) */
+}
+
+.empty-state-text {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-6);
+  line-height: 1.6;
+}
+
+
+/* ============================================================
+   COMMAND PALETTE (Quick Search)
+
+   A searchable overlay (usually opened with Cmd+K or Ctrl+K)
+   for quick navigation and commands.
+   ============================================================ */
+
+.cmd-palette {
+  position: fixed;                   /* Full screen overlay */
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);    /* Semi-transparent dark overlay */
+  display: flex;
+  align-items: flex-start;           /* Align to top (not centered) */
+  justify-content: center;           /* Center horizontally */
+  padding-top: 20vh;                 /* Start 20% down from top */
+  z-index: 250;
+  opacity: 0;                        /* Hidden by default */
+  pointer-events: none;
+  transition: opacity 150ms var(--ease-default);  /* Fade in/out */
+}
+
+.cmd-palette.open { opacity: 1; pointer-events: auto; }  /* Show and allow clicks */
+
+.cmd-palette-box {
+  background: var(--bg-elevated);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  width: 90%;                        /* 90% of screen */
+  max-width: 480px;                  /* Cap at 480px */
+  overflow: hidden;                  /* Results container handles scrolling */
+}
+
+.cmd-palette-input {
+  width: 100%;
+  padding: var(--space-4);
+  background: transparent;           /* No background, just text */
+  border: none;
+  border-bottom: 1px solid var(--bg-subtle);  /* Divider line below search */
+  color: var(--text-primary);
+  font-size: var(--text-base);
+}
+
+.cmd-palette-input:focus { outline: none; }
+
+.cmd-palette-results {
+  max-height: 320px;                 /* Cap height so it doesn't overflow screen */
+  overflow-y: auto;                  /* Scroll if too many results */
+  padding: var(--space-2);           /* Padding inside container */
+}
+
+.cmd-palette-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+/* Highlight item when hovering or when it's selected (keyboard navigation) */
+.cmd-palette-item:hover,
+.cmd-palette-item.selected {
+  background: var(--accent-subtle);  /* Faint accent background */
+  color: var(--text-primary);        /* Brighter text */
+}
+
+.cmd-palette-item-type {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-left: auto;                 /* Push to the right */
+}
+
+
+/* ============================================================
+   SKELETON LOADING
+
+   A placeholder animation shown while content is loading.
+   It looks like a blinking/shimmering skeleton of the real content.
+   ============================================================ */
+
+.skeleton {
+  /* Gradient animation: light color moves across the element,
+     creating a shimmering "loading" effect */
+  background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-elevated) 50%, var(--bg-surface) 75%);
+  background-size: 200% 100%;        /* Gradient is 2x wider than the element */
+  animation: skeleton-shimmer 1.5s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+
+/* Animation: slide the gradient left and right to create shimmer effect */
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }   /* Start with gradient off-screen right */
+  100% { background-position: -200% 0; }  /* End with gradient off-screen left */
+}
+
+/* Placeholder for text content (a thin rectangle) */
+.skeleton-text { height: 14px; margin-bottom: 8px; }
+.skeleton-text:last-child { width: 60%; }  /* Last line is shorter (like real text) */
+
+
+/* ============================================================
+   TOOLBAR
+
+   A horizontal bar with buttons, search, and other controls.
+   Usually appears at the top of a page section.
+   ============================================================ */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-6);
+  flex-wrap: wrap;                   /* Wrap to multiple lines on small screens */
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);               /* Tight spacing within a group */
+}
+
+/* Vertical divider line between toolbar groups */
+.toolbar-separator {
+  width: 1px;                        /* Very thin line */
+  height: 24px;
+  background: var(--bg-subtle);      /* Use subtle background color */
+  margin: 0 var(--space-2);          /* Space around the line */
+}
+
+.toolbar-search {
+  flex: 1;                           /* Search grows to fill available space */
+  min-width: 200px;                  /* But never gets narrower than 200px */
+  max-width: 320px;                  /* And never gets wider than 320px */
+}
+
+
+/* ============================================================
+   PAGE FADE-IN
+
+   When a page first loads, it fades in smoothly instead of
+   appearing instantly.
+   ============================================================ */
+
+.page { animation: page-fade-in var(--duration-normal) var(--ease-default); }
+
+/* Animation: fade from invisible to visible */
+@keyframes page-fade-in {
+  from { opacity: 0; }               /* Start completely transparent */
+  to   { opacity: 1; }               /* End completely visible */
+}
+
+
+/* ============================================================
+   RESPONSIVE DESIGN
+
+   CSS rules that change based on screen size.
+   These help the layout work on phones, tablets, and desktops.
+   ============================================================ */
+
+/* On medium screens (tablets), make columns slightly narrower */
+@media (max-width: 1199px) {
+  .kanban-column { flex: 0 0 240px; min-width: 240px; }
+}
+
+/* On small screens (phones), stack everything vertically */
+@media (max-width: 767px) {
+  .kanban { flex-direction: column; padding: 0 var(--space-3); }  /* Stack columns vertically */
+  .kanban-column { flex: none; min-width: 100%; }  /* Columns take full width */
+  .nav-links { display: none; }  /* Hide navigation links (too many for small screen) */
+  .toolbar { padding: var(--space-3); }  /* Less padding on small screens */
+}
+
+
+/* ============================================================
+   PRINT STYLES
+
+   How the page looks when printed to paper or PDF.
+   We hide interactive elements and adjust colors for printing.
+   ============================================================ */
+
+/* ============================================================
+   SKELETON LOADING STATES
+   Shimmer animation for content placeholders while data loads.
+   ============================================================ */
+
+.skeleton {
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  position: relative;
+  overflow: hidden;
+}
+
+.skeleton::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
+  animation: skeletonShimmer 1.5s infinite;
+}
+
+@keyframes skeletonShimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.skeleton-text { height: 14px; margin-bottom: 8px; width: 80%; }
+.skeleton-text.short { width: 40%; }
+.skeleton-text.medium { width: 60%; }
+.skeleton-heading { height: 20px; margin-bottom: 12px; width: 50%; }
+.skeleton-card {
+  background: var(--bg-surface);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+.skeleton-bar { height: 8px; border-radius: var(--radius-pill); margin-bottom: 6px; }
+
+
+@media print {
+  /* Hide these elements; they don't make sense in print */
+  .nav, .toolbar, .toast-container, .cmd-palette { display: none !important; }
+
+  .page { padding-top: 0; }          /* No padding needed in print */
+  body { background: #fff; color: #000; }  /* White background, black text for print */
+  .card { box-shadow: none; border: 1px solid #ddd; }  /* No shadows in print; use simple border */
+}

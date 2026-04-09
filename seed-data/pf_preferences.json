@@ -1,0 +1,6 @@
+{
+  "key": "pf_preferences",
+  "value": "{\"targetTitles\":[\"Senior Product Manager\",\"Staff Product Manager\",\"Principal Product Manager\",\"Director of Product\",\"VP Product\"],\"seniority\":\"senior\",\"primaryDomains\":[\"SaaS\",\"AI/ML\",\"Cloud Infrastructure\",\"Developer Tools\"],\"secondaryDomains\":[\"Fintech\",\"Healthcare Tech\",\"E-commerce\"],\"excludedDomains\":[\"Crypto\",\"Gaming\"],\"companyStage\":[\"Series B\",\"Series C+\",\"Late-stage / Pre-IPO\",\"Public\"],\"minHeadcount\":100,\"locations\":[\"San Francisco\",\"New York\",\"Remote\",\"Seattle\",\"Austin\"],\"compRange\":{\"minBase\":180000,\"targetBase\":280000},\"mustHaveKeywords\":[\"product manager\",\"strategy\",\"roadmap\",\"cross-functional\"],\"boostKeywords\":[\"AI\",\"machine learning\",\"platform\",\"growth\",\"data\"],\"excludeKeywords\":[\"junior\",\"associate\",\"intern\",\"contract\"]}",
+  "updatedAt": "2026-03-15T14:30:00.000Z",
+  "sizeBytes": 742
+}

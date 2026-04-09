@@ -1,0 +1,6 @@
+{
+  "key": "pf_feed_runs",
+  "value": "[{\"id\":\"run_001\",\"timestamp\":\"2026-04-06T08:00:00.000Z\",\"source\":\"seed_data\",\"status\":\"completed\",\"itemsProcessed\":10,\"itemsAdded\":10,\"itemsSkipped\":0,\"duplicatesFound\":0,\"scoringVersion\":\"1.2.1\",\"summary\":\"Initial seed data load - 10 job postings added from 5 companies\"}]",
+  "updatedAt": "2026-04-06T08:00:00.000Z",
+  "sizeBytes": 356
+}

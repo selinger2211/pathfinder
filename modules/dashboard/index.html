@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard — Pathfinder</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect fill='%236366f1' width='32' height='32'/><text x='50%25' y='50%25' font-size='20' font-weight='700' text-anchor='middle' dominant-baseline='middle' fill='white' font-family='system-ui'>P</text></svg>">
+  <link rel="stylesheet" href="../shared/pathfinder.css">
+  <style>
+    /* ====== DASHBOARD-SPECIFIC STYLES ====== */
+
+    .dashboard-container {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 0;
+      animation: fadeIn 200ms var(--ease-default) forwards;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateX(-20px);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+
+    @keyframes slideDown {
+      from {
+        opacity: 0;
+        transform: translateY(-20px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes countUp {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    @keyframes growBar {
+      from { width: 0%; }
+      to { width: 100%; }
+    }
+
+    .zone-greeting {
+      padding: var(--space-8) var(--space-6) var(--space-6) var(--space-6);
+      border-bottom: 1px solid var(--bg-subtle);
+    }
+
+    .greeting-text {
+      font-size: var(--text-3xl);
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: var(--space-4);
+      line-height: 1.2;
+    }
+
+    .greeting-time {
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+
+    .zone-action-queue {
+      padding: var(--space-6);
+      min-height: 300px;
+    }
+
+    .zone-title {
+      font-size: var(--text-xl);
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: var(--space-4);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-size: var(--text-sm);
+      color: var(--text-secondary);
+    }
+
+    .nudge-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-3);
+    }
+
+    .nudge-card {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-3);
+      padding: var(--space-4);
+      background: var(--bg-surface);
+      border-radius: var(--radius-md);
+      border-left: 4px solid var(--accent);
+      box-shadow: var(--shadow-sm);
+      animation: slideIn 300ms var(--ease-default) forwards;
+      animation-fill-mode: both;
+    }
+
+    .nudge-card:nth-child(1) { animation-delay: 0ms; }
+    .nudge-card:nth-child(2) { animation-delay: 50ms; }
+    .nudge-card:nth-child(3) { animation-delay: 100ms; }
+    .nudge-card:nth-child(4) { animation-delay: 150ms; }
+    .nudge-card:nth-child(5) { animation-delay: 200ms; }
+
+    .nudge-card.critical { border-left-color: var(--danger); }
+    .nudge-card.important { border-left-color: var(--warning); }
+    .nudge-card.informational { border-left-color: var(--info); }
+
+    .nudge-logo {
+      width: 36px;
+      height: 36px;
+      border-radius: var(--radius-sm);
+      background: var(--bg-subtle);
+      flex-shrink: 0;
+      object-fit: contain;
+    }
+
+    .nudge-content {
+      flex: 1;
+    }
+
+    .nudge-badge {
+      display: inline-block;
+      font-size: var(--text-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: var(--space-1) var(--space-2);
+      border-radius: var(--radius-sm);
+      margin-bottom: var(--space-2);
+    }
+
+    .nudge-badge.critical {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--danger);
+    }
+
+    .nudge-badge.important {
+      background: rgba(234, 179, 8, 0.15);
+      color: var(--warning);
+    }
+
+    .nudge-badge.informational {
+      background: rgba(59, 130, 246, 0.15);
+      color: var(--info);
+    }
+
+    .nudge-text {
+      font-size: var(--text-base);
+      color: var(--text-primary);
+      line-height: 1.5;
+      margin-bottom: var(--space-2);
+    }
+
+    .nudge-highlight {
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    .nudge-actions {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+      align-items: flex-end;
+      flex-shrink: 0;
+    }
+
+    .nudge-action-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+      padding: var(--space-2) var(--space-3);
+      background: var(--accent);
+      color: white;
+      border-radius: var(--radius-sm);
+      font-size: var(--text-xs);
+      font-weight: 600;
+      cursor: pointer;
+      transition: all var(--duration-fast) var(--ease-default);
+      white-space: nowrap;
+      border: none;
+    }
+
+    .nudge-action-btn:hover {
+      background: var(--accent-hover);
+      transform: translateY(-2px);
+    }
+
+    .nudge-dismiss-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      background: transparent;
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all var(--duration-fast) var(--ease-default);
+    }
+
+    .nudge-dismiss-btn:hover {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      border-color: var(--text-secondary);
+    }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: var(--space-12) var(--space-6);
+      text-align: center;
+    }
+
+    .empty-state-emoji {
+      font-size: 3rem;
+      margin-bottom: var(--space-4);
+    }
+
+    .empty-state-text {
+      font-size: var(--text-lg);
+      color: var(--text-primary);
+      margin-bottom: var(--space-2);
+      font-weight: 600;
+    }
+
+    .empty-state-subtext {
+      font-size: var(--text-sm);
+      color: var(--text-secondary);
+      margin-bottom: var(--space-4);
+    }
+
+    .empty-state-cta {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+      padding: var(--space-3) var(--space-4);
+      background: var(--accent);
+      color: white;
+      border-radius: var(--radius-md);
+      font-weight: 600;
+      cursor: pointer;
+      transition: all var(--duration-fast) var(--ease-default);
+      border: none;
+      text-decoration: none;
+    }
+
+    .empty-state-cta:hover {
+      background: var(--accent-hover);
+      transform: translateY(-2px);
+    }
+
+    .zone-summary {
+      padding: var(--space-6);
+      border-top: 1px solid var(--bg-subtle);
+    }
+
+    .summary-title {
+      font-size: var(--text-sm);
+      font-weight: 700;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: var(--space-4);
+    }
+
+    .chart-row {
+      display: flex;
+      gap: var(--space-2);
+      align-items: center;
+      margin-bottom: var(--space-3);
+    }
+
+    .chart-label {
+      width: 100px;
+      font-size: var(--text-xs);
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      font-weight: 500;
+    }
+
+    .chart-bar-container {
+      flex: 1;
+      height: 24px;
+      background: var(--bg-elevated);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .chart-bar {
+      height: 100%;
+      border-radius: var(--radius-sm);
+      animation: growBar 500ms var(--ease-default) forwards;
+      animation-fill-mode: both;
+    }
+
+    .chart-bar:nth-child(1) { animation-delay: 0ms; }
+    .chart-bar:nth-child(2) { animation-delay: 80ms; }
+    .chart-bar:nth-child(3) { animation-delay: 160ms; }
+    .chart-bar:nth-child(4) { animation-delay: 240ms; }
+    .chart-bar:nth-child(5) { animation-delay: 320ms; }
+    .chart-bar:nth-child(6) { animation-delay: 400ms; }
+    .chart-bar:nth-child(7) { animation-delay: 480ms; }
+    .chart-bar:nth-child(8) { animation-delay: 560ms; }
+
+    .chart-count {
+      font-size: var(--text-xs);
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-weight: 600;
+      min-width: 30px;
+      text-align: right;
+    }
+
+    .total-roles {
+      font-size: var(--text-lg);
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: var(--space-4);
+    }
+
+    .streak-counter {
+      font-size: var(--text-2xl);
+      font-weight: 700;
+      color: var(--accent);
+      font-family: var(--font-mono);
+      animation: countUp 600ms var(--ease-bounce) forwards;
+    }
+
+    .metric-value {
+      font-size: var(--text-2xl);
+      font-weight: 700;
+      color: var(--accent);
+      font-family: var(--font-mono);
+      animation: countUp 500ms var(--ease-bounce) forwards;
+    }
+
+    .quick-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      padding: var(--space-6);
+      border-top: 1px solid var(--bg-subtle);
+    }
+
+    .quick-action-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-2);
+      padding: var(--space-4);
+      background: var(--bg-surface);
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-md);
+      color: var(--text-primary);
+      font-weight: 600;
+      font-size: var(--text-sm);
+      cursor: pointer;
+      transition: all var(--duration-fast) var(--ease-default);
+      text-decoration: none;
+    }
+
+    .quick-action-btn:hover {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .quick-action-btn.primary {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
+
+    .quick-action-btn.primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .dashboard-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--bg-subtle);
+      border-radius: var(--radius-md);
+      padding: 24px;
+      margin-bottom: 24px;
+      animation: fadeIn 200ms var(--ease-default) forwards;
+    }
+
+    .dashboard-card:hover {
+      border-color: var(--accent);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .card-header h3 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin: 0;
+    }
+
+    .card-link {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 500;
+      transition: color 200ms;
+    }
+
+    .card-link:hover {
+      color: var(--accent-hover);
+    }
+
+    .card-body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .empty-state-card {
+      color: var(--text-tertiary);
+      font-size: 14px;
+      text-align: center;
+      padding: 24px 0;
+    }
+
+    .feed-item {
+      padding: 12px;
+      background: var(--bg-secondary);
+      border-left: 3px solid var(--accent);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 200ms;
+    }
+
+    .feed-item:hover {
+      background: var(--bg-tertiary);
+      transform: translateX(4px);
+    }
+
+    .feed-item-company {
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+
+    .feed-item-title {
+      color: var(--text-secondary);
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+
+    .feed-item-score {
+      display: inline-block;
+      background: var(--accent);
+      color: white;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .interview-item {
+      padding: 12px;
+      background: var(--bg-secondary);
+      border-left: 3px solid var(--success);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 200ms;
+    }
+
+    .interview-item:hover {
+      background: var(--bg-tertiary);
+    }
+
+    .interview-datetime {
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+
+    .interview-company {
+      color: var(--text-secondary);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+
+    .interview-type {
+      display: inline-block;
+      background: var(--info);
+      color: white;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-right: 8px;
+    }
+
+    .interview-countdown {
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+
+    .funnel-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 0;
+    }
+
+    .funnel-bar-label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      min-width: 90px;
+    }
+
+    .funnel-bar-container {
+      flex: 1;
+      height: 24px;
+      background: var(--bg-secondary);
+      border-radius: 4px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: all 200ms;
+    }
+
+    .funnel-bar-container:hover {
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    }
+
+    .funnel-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding-right: 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: white;
+      transition: width 300ms ease-out;
+    }
+
+    .funnel-bar-count {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      min-width: 35px;
+      text-align: right;
+    }
+
+    .activity-item {
+      padding: 8px 12px;
+      background: var(--bg-secondary);
+      border-left: 2px solid var(--text-tertiary);
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 200ms;
+    }
+
+    .activity-item:hover {
+      border-left-color: var(--accent);
+      background: var(--bg-tertiary);
+    }
+
+    .activity-item-action {
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+
+    .activity-item-time {
+      color: var(--text-tertiary);
+      font-size: 11px;
+    }
+
+    .stat-item {
+      text-align: center;
+      padding: 12px;
+      background: var(--bg-secondary);
+      border-radius: var(--radius-sm);
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      margin-bottom: 8px;
+      font-weight: 500;
+    }
+
+    .stat-value {
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 16px;
+    }
+
+    .activity-feed {
+      gap: 8px;
+    }
+
+    .activity-section {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+    }
+
+    .activity-metric {
+      padding: var(--space-4);
+      background: var(--bg-elevated);
+      border-radius: var(--radius-md);
+    }
+
+    .metric-label {
+      font-size: var(--text-xs);
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 600;
+      margin-bottom: var(--space-2);
+    }
+
+    @media (max-width: 640px) {
+      .quick-actions {
+        grid-template-columns: 1fr;
+      }
+
+      .activity-section {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="nav-container"></div>
+
+  <main class="dashboard-container" role="main">
+    <!-- Zone 1: Greeting + Streak -->
+    <div class="zone-greeting" id="greetingZone" style="display: none;">
+      <div class="greeting-text">
+        Good <span class="greeting-time" id="timeOfDay">morning</span>, Ili
+      </div>
+      <div id="streakDisplay" class="streak-counter" style="display: none;">
+        <span class="streak-icon">🔥</span>
+        <span id="streakCount">0</span> day streak
+      </div>
+    </div>
+
+    <!-- Zone 2: Action Queue (Nudges) -->
+    <div class="zone-action-queue" id="actionQueueZone" style="display: none;">
+      <div class="zone-title">Action Queue</div>
+      <div class="nudge-list" id="nudgeList" role="list" aria-live="polite"></div>
+    </div>
+
+    <!-- Zone 3: Pipeline Summary -->
+    <div class="zone-summary" id="summaryZone" style="display: none;" aria-live="polite">
+      <div class="summary-title">Pipeline Summary</div>
+
+      <div class="total-roles">
+        <span id="totalRolesCount">0</span> roles in pipeline
+      </div>
+
+      <!-- Stage distribution chart -->
+      <div class="chart-section">
+        <div id="stageChartContainer"></div>
+      </div>
+
+      <!-- Conversion funnel stats -->
+      <div class="funnel-section" style="margin-top: var(--space-6); border-top: 1px solid var(--bg-subtle); padding-top: var(--space-6);">
+        <div class="summary-title">Conversion Funnel</div>
+        <div id="funnelContainer"></div>
+      </div>
+
+      <!-- Activity metrics with trend -->
+      <div style="margin-top: var(--space-6); border-top: 1px solid var(--bg-subtle); padding-top: var(--space-6);">
+        <div class="summary-title">Activity Trend</div>
+        <div class="activity-section">
+          <div class="activity-metric" role="status">
+            <div class="metric-label">Added This Week</div>
+            <div class="metric-value" id="metricAdded">0</div>
+          </div>
+          <div class="activity-metric" role="status">
+            <div class="metric-label">Advanced This Week</div>
+            <div class="metric-value" id="metricProgressed">0</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Network Advantage Section -->
+      <div id="networkAdvantageSection" style="display: none; margin-top: var(--space-6); border-top: 1px solid var(--bg-subtle); padding-top: var(--space-6);">
+        <div class="summary-title">Network Advantage</div>
+        <div id="networkAdvantageContainer" style="display: flex; flex-direction: column; gap: var(--space-3);"></div>
+      </div>
+
+      <!-- New Matches Section -->
+      <div id="newMatchesSection" style="display: none; margin-top: var(--space-6); border-top: 1px solid var(--bg-subtle); padding-top: var(--space-6);">
+        <div class="summary-title">New Matches</div>
+        <div id="newMatchesGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--space-3);"></div>
+      </div>
+
+      <!-- Time in Stage Section -->
+      <div id="timeInStageSection" style="display: none; margin-top: var(--space-6); border-top: 1px solid var(--bg-subtle); padding-top: var(--space-6);">
+        <div class="summary-title">Time in Stage</div>
+        <div id="timeInStageContainer"></div>
+      </div>
+    </div>
+
+    <!-- Quick Actions Bar -->
+    <div class="quick-actions" id="quickActionsContainer">
+      <a href="../pipeline/index.html?modal=add" class="quick-action-btn primary" aria-label="Add new role">+ Add Role</a>
+      <a href="../research-brief/index.html" class="quick-action-btn" aria-label="Go to Research Brief">📋 Research Brief</a>
+      <a href="../resume-tailor/index.html" class="quick-action-btn" aria-label="Go to Resume Tailor">📝 Resume Tailor</a>
+      <a href="../pipeline/index.html" class="quick-action-btn" aria-label="View Pipeline">📊 View Pipeline</a>
+    </div>
+  </main>
+
+  <!-- Shared Infrastructure Scripts -->
+  <script src="../shared/data-layer.js?v=3.10.1"></script>
+  <script src="../shared/mcp-client.js?v=3.10.1"></script>
+  <script src="../shared/components.js?v=3.10.1"></script>
+  <script src="../shared/logos.js?v=3.10.1"></script>
+  <script src="../shared/comp-utils.js?v=3.10.1"></script>
+  <script src="../shared/backup-utils.js?v=3.10.1"></script>
+  <script src="../shared/command-palette.js?v=3.10.1"></script>
+
+  <!-- Dashboard Module -->
+  <script src="./dashboard.js?v=3.10.1"></script>
+</body>
+</html>

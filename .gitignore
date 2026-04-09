@@ -1,0 +1,34 @@
+# Personal data (contains real job search data — never commit)
+.pathfinder-data/
+
+# Dependencies
+node_modules/
+
+# Build artifacts
+mcp-server/dist/
+
+# Process files
+.pids/
+.logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Skill packages (personal config)
+*.skill
+
+# Test / migration scripts (dev only)
+test-*.js
+test_*.js
+migrate*.html
+
+# Claude session data
+.claude/

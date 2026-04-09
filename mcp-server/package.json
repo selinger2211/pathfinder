@@ -1,0 +1,26 @@
+{
+  "name": "pathfinder-mcp-server",
+  "version": "1.0.0",
+  "description": "Pathfinder Artifacts MCP Server — stores and retrieves research briefs, resumes, JDs, debriefs, citations, and mock session artifacts with structured tagging",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "pathfinder-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:http": "node dist/index.js --http",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "express": "^4.21.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
