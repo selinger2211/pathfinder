@@ -1,5 +1,162 @@
 # Pathfinder v3 Changelog
 
+## v4.4.0 — 2026-05-21
+
+### DuckDuckGo Web Search Fallback for JD Fetches
+
+**Problem:** LinkedIn blocks all server-side JD fetches (guest API, direct fetch). All LinkedIn-sourced feed items fail enrichment.
+
+**Solution:** Automatic web search fallback in the fetch-jd pipeline. When any URL fails to return usable JD text and the request includes company+title, the server searches DuckDuckGo for the same job on scrapable sites.
+
+**Fetch cascade (fetch-jd endpoint):**
+1. Primary fetch: LinkedIn guest API (for linkedin.com URLs) or direct fetch (all others)
+2. If primary fails AND company+title provided → DuckDuckGo search fallback
+3. Search query: `"{company}" "{title}" job`
+4. Rank results by scrapable domain: Greenhouse > Lever > Ashby > Workday > SmartRecruiters > careers.* > jobs.* > Indeed > Glassdoor > BuiltIn > Wellfound > ZipRecruiter
+5. Try top 5 candidates, verify JD signals (responsibilities, qualifications, etc.)
+6. Return first successful match with provenance metadata
+
+**New files:**
+- `pathfinder/job-tracker/fetchers/web-search-fallback.js` — standalone DDG search module (also usable by job-tracker pipeline)
+- `server.cjs` — inline `searchAlternativeJD()` + `searchDuckDuckGo()` for zero-dependency server use
+
+**Pipeline integration:**
+- `scripts/feed-pipeline.js` — enrichItem now sends `{ url, company, title }` to `/api/fetch-jd`
+- Fallback provenance tracked on items: `jdSource`, `jdSourceUrl`, `jdSourceDomain`
+- New stat: `enrichFallback` count in pipeline output
+
+**Phoenix tracing:**
+- `jd.primaryFailed`, `jd.primaryFailReason` — primary fetch failure tracking
+- `jd.fallbackAttempted`, `jd.fallback.success`, `jd.fallback.searchQuery` — search fallback tracking
+- `jd.fallback.sourceDomain`, `jd.fallback.sourceUrl`, `jd.fallback.resultsFound`, `jd.fallback.resultsTried`
+- `jd.usedFallback` — final flag on the response span
+- `enrich.usedFallback`, `enrich.fallbackDomain` — per-item pipeline spans
+
+## v4.3.0 — 2026-05-21
+
+### Phoenix Observability Integration
+
+**Arize Phoenix tracing stack**
+- New `tracing.cjs` shared module — initializes OpenTelemetry with `@arizeai/phoenix-otel`, exports `getTracer()`, `withSpan()`, `withSpanSync()` helpers
+- Graceful no-op design: if Phoenix Docker is down, OTEL exporter silently drops spans with zero app impact
+- `isPhoenixHealthy()` async health check for status display
+
+**Instrumented modules**
+- `server.cjs` — root span per API request (method, path, status code); detailed attributes on `/api/generate-resume` (company, title, domain, bullets, format), `/api/feed/process` (forceRescore, forceExtract), and `/api/fetch-jd` (url, isLinkedIn, charCount, truncated, error); Phoenix health in `/api/health` response
+- `scripts/feed-pipeline.js` — `runPipeline` root span with full pipeline stats; `stageEnrich` span (queue size, success/failed counts), `stageExtract` span (processed, salaries found), `stageScore` span (scored count, avg score); each stage as child span with detailed attributes
+- `score-engine.js` — `scoreFeedItem` span with all 8 dimension scores, company/title/jdLength, blocked status; `scoreAllFeedItems` batch span with size and average score; conditional loading (Node.js only, no-op in browser)
+- `resume-generator.cjs` — `generateResume` span tracking domain detection, keyword matching, bullet selection, PDF conversion, page count; `generateGenericResume` span with domain and output format
+
+**Infrastructure**
+- `docker-compose.yml` for Phoenix (port 6006 UI + OTLP, port 4317 gRPC, persistent volume)
+- `start.sh` updated: Phoenix status check in both startup output and `./start.sh status`
+- New npm deps: `@arizeai/phoenix-otel`, `@opentelemetry/api`
+- Config via env vars: `PHOENIX_ENDPOINT`, `PHOENIX_PROJECT`, `TRACING_DISABLED`
+
+## v4.2.0 — 2026-05-18
+
+### Blocked Companies + AdTech Premium Boost
+
+**Blocked Companies feature**
+- New `blockedCompanies` array in preferences — each entry has `{ company, blockedAt }` for audit trail
+- Score engine short-circuits blocked companies to score 0 with `blocked: true` flag
+- Feed filter excludes blocked companies from display (alongside dismissed/snoozed)
+- "Block Company" button (🚫) on feed cards and detail panel — one click blocks + auto-dismisses all items from that company
+- Blocked Companies section in Feed Preferences panel with red-tinted chip UI — type to add, × to unblock
+- Fuzzy matching: "Pinterest" blocks "Pinterest, Inc." and vice versa
+- `savePreferences()` preserves `blockedAt` timestamps when re-saving existing blocks
+
+**AdTech premium boost**
+- AdTech roles now get +18 final score boost (up from +12 shared with other preferred industries)
+- AdTech domainFit locked to 100 (other preferred industries cap at 90)
+- Other preferred industries (FinTech, AI/ML Platform, Data Platform, Internal/SalesOps) unchanged at +12
+- Reason strings now flag "(AdTech primary)" for transparency in scoring breakdown
+
+## v4.1.0 — 2026-05-18
+
+### Scoring Engine v3 — Deep JD Analysis, Weight Rebalancing, Noise Reduction
+
+**Weight rebalancing (SCORE_WEIGHTS v3)**
+- networkFit: 30% → 12% (demoted from dominant signal to tiebreaker — was causing too much noise from high-connection low-fit roles)
+- domainFit: 13% → 18% (promoted — AdTech/FinTech/AI/ML signal is the primary quality signal)
+- locationFit: 8% → 15% (promoted — location is a hard constraint, not a soft preference)
+- titleFit: 17% → 15% (slight trim)
+- companyFit: 10% → 8% (slight trim — stage is a soft signal)
+- compensationFit: 12% → 12% (unchanged)
+- levelFit: 10% → 10% (unchanged)
+- **NEW: jdFit: 10%** — deep JD content analysis dimension
+
+**New jdFit dimension — deep JD content analysis**
+- Experience domain matching against 5 career domains: AI/ML Products, AdTech/Advertising, FinTech/Payments, Data/Analytics Platform, Enterprise SaaS/Platform
+- Each domain weighted by depth of experience (AI/ML and AdTech = 1.0, FinTech = 0.9, Data = 0.85, Enterprise SaaS = 0.7)
+- 10 responsibility patterns scored: cross-functional leadership, 0→1 building, platform/API strategy, P&L ownership, data-driven experimentation, scale experience, partnerships, technical PM
+- 6 red flag domains penalized: Healthcare/Biotech, Gaming, Crypto/Web3, Hardware/Embedded, Construction/RE, EdTech
+- Years-of-experience sanity check: 8-20 years = bonus, <5 years = penalty
+
+**Location tier overhaul**
+- All commutable Bay Area cities (WC area + Oakland/Berkeley + SF + mid-peninsula) now score 100
+- Remote: 85 (down from 95 — still strong but below in-person preferred locations)
+- Hybrid near WC/SF: 80
+- Hybrid South Bay: 65 (new distinct category — long commute on office days)
+- South Bay in-office: 55 (down from 65)
+- Other California: 35 (down from 50)
+- Out-of-state/Unknown: 20 (down from 30)
+
+**Preferred industry expansion**
+- Added AI/ML Platform keywords (genai, llm, agentic, rag, vector search, embedding, knowledge management, etc.)
+- Added Data Platform keywords (data mesh, observability, apm, telemetry, customer data platform, etc.)
+- These join existing AdTech, FinTech, and Internal/SalesOps as preferred industries (all get +12 final score boost)
+
+**Noise floor penalties**
+- No JD + no salary: score capped at 35 (was floating 50-65 on defaults)
+- No JD text: score capped at 45
+- Zero title match: score capped at 40
+- Prevents low-information items from cluttering the feed
+
+**UI updates**
+- Job Feed scoring breakdown now shows 8 dimensions including JD Fit
+- Dimension display order changed to weight-descending (Domain → Title → Location → Network → Comp → JD → Level → Company)
+- Pipeline `computeWeightedScore()` fallback weights updated to v3
+- Job Feed `applyDismissalPenalties()` now uses canonical SCORE_WEIGHTS instead of hardcoded values
+
+## v4.0.0 — 2026-05-11
+
+### Agent Architecture Build — 5 Agents, Multi-Source Feed, Outreach Drafter
+
+**Architecture: 5-agent system with file-based message passing**
+- Defined typed agent specs with inputs, outputs, health checks, and test cases in `docs/agent-instructions.md`
+- Agents communicate through shared `.pathfinder-data/` files — no direct coupling
+- Company Intel agent dropped; enrichment folded into Feed Scout
+
+**Feed Scout — multi-source email parsing (Phase 1)**
+- New `modules/shared/email-parsers.js` — pluggable parser registry with LinkedIn + Jobright parsers
+- Updated `pathfinder-email-feed-scan` scheduled task to scan 3 Gmail queries: LinkedIn (2) + Jobright (1)
+- Jobright parser extracts structured data from subject + snippet: company, title, match %, salary, location, stage, industry
+- Cross-source dedup catches the same role from LinkedIn and Jobright
+- Jobright-specific scoring signals: match % bonus, salary factor, company stage signal
+
+**Health Monitor — new agent**
+- New `pathfinder-health-monitor` scheduled task, runs every 30 minutes
+- Checks: data file integrity (valid JSON, wrapper format), feed freshness, stuck resume requests, stale pipeline roles, outreach queue
+- Writes `pf_health_report.json` with per-agent status (healthy/degraded/unhealthy) and actionable recommendations
+
+**Pipeline Orchestrator — stale role detection, stage validation, batch ops**
+- `detectStaleRoles()` scans all roles against stage-specific staleness thresholds (7-14 days)
+- Stale kanban cards show amber nudge banners with "No activity in N days" + dismiss button
+- Stage transition validation: warns when skipping stages, prompts resume generation on "Applying" move
+- Batch operations dropdown: "Score all unscored roles (N)" and "Generate resumes for Applying roles (N)"
+
+**Outreach Drafter — new agent**
+- New `modules/shared/outreach-templates.js` with 5 templates: linkedin_connect (300 char), linkedin_inmail (1900 char), email_cold, email_referral, referral_ask
+- "Outreach" section in pipeline detail panel: message type selector, recipient info, draft display with copy-to-clipboard and version history
+- New server endpoints: `POST /api/outreach-requests`, `GET /api/role-outreach/:roleId`
+- New `pathfinder-outreach-drafter` scheduled task (every 15 min) generates personalized messages using real proof points
+
+**Cleanup**
+- Consolidated dual weight systems: pipeline.js `computeWeightedScore()` now delegates to `SCORE_WEIGHTS` from score-engine.js (single source of truth)
+- Updated CLAUDE_CONTEXT.md with agent architecture table
+- Added `email-parsers.js` to job-feed/index.html script includes
+
 ## v3.9.0 — 2026-03-31
 
 ### P2/P3 Audit Fixes — Command Palette, Semantic Search, Scoring Recalibration

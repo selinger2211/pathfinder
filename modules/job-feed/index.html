@@ -348,6 +348,7 @@
       border: 1px solid var(--bg-subtle);
       border-radius: var(--radius-md);
       padding: var(--space-4);
+      transition: opacity 0.3s ease;
     }
 
     .preferences-toggle {
@@ -357,6 +358,7 @@
       cursor: pointer;
       font-weight: 500;
       color: var(--text-primary);
+      user-select: none;
     }
 
     .preferences-toggle:hover {
@@ -366,6 +368,7 @@
     .preferences-toggle-arrow {
       display: inline-block;
       transition: transform 0.2s ease;
+      margin-left: var(--space-2);
     }
 
     .preferences-toggle-arrow.collapsed {
@@ -377,6 +380,14 @@
       grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: var(--space-4);
       margin-top: var(--space-4);
+      transition: max-height 0.3s ease, opacity 0.3s ease, visibility 0.3s ease;
+      overflow: hidden;
+    }
+
+    .preferences-content[style*="display: none"] {
+      max-height: 0;
+      opacity: 0;
+      visibility: hidden;
     }
 
     .form-group {
@@ -536,7 +547,7 @@
       border-radius: var(--radius-md);
       padding: var(--space-4);
       display: grid;
-      grid-template-columns: var(--feed-badge-size) 1fr auto;
+      grid-template-columns: 1.5rem var(--feed-badge-size) 1fr auto;
       gap: var(--space-4);
       align-items: start;
       transition: all 0.2s ease;
@@ -770,6 +781,20 @@
       line-height: 1.3;
     }
 
+    .feed-jd-link {
+      font-size: 0.8rem;
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 400;
+      margin-left: 4px;
+      opacity: 0.7;
+      transition: opacity 0.15s;
+    }
+    .feed-jd-link:hover {
+      opacity: 1;
+      text-decoration: underline;
+    }
+
     .feed-company {
       color: var(--text-secondary);
       font-size: 0.95rem;
@@ -818,6 +843,26 @@
       color: var(--accent);
     }
 
+    /* Match/gap pills */
+    .match-pill {
+      padding: 2px 8px;
+      font-size: 0.68rem;
+      border-radius: 10px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      line-height: 1.4;
+    }
+
+    .match-pill--positive {
+      background: rgba(16, 185, 129, 0.15);
+      color: #059669;
+    }
+
+    .match-pill--dealbreaker {
+      background: rgba(245, 158, 11, 0.15);
+      color: #d97706;
+    }
+
     /* Score breakdown */
     .score-breakdown {
       background: var(--bg-base);
@@ -860,6 +905,115 @@
       min-width: 40px;
       text-align: right;
       flex-shrink: 0;
+    }
+
+    /* Selection checkbox */
+    .feed-checkbox {
+      width: 1.25rem;
+      height: 1.25rem;
+      cursor: pointer;
+      accent-color: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .feed-card--selected {
+      background: var(--bg-elevated);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.1);
+    }
+
+    .feed-card--selected .feed-checkbox {
+      accent-color: var(--accent);
+    }
+
+    /* Bulk Actions Toolbar */
+    .bulk-toolbar {
+      background: var(--bg-surface);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius-md);
+      padding: var(--space-3) var(--space-4);
+      margin-bottom: var(--feed-card-gap);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-4);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      animation: slideDown 200ms ease-out;
+    }
+
+    @keyframes slideDown {
+      from {
+        opacity: 0;
+        transform: translateY(-10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .bulk-toolbar__content {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      gap: var(--space-4);
+    }
+
+    .bulk-toolbar__left {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+    }
+
+    .bulk-select-all {
+      width: 1.25rem;
+      height: 1.25rem;
+      cursor: pointer;
+      accent-color: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .bulk-toolbar__count {
+      font-weight: 600;
+      color: var(--text-primary);
+      font-size: 0.95rem;
+    }
+
+    .bulk-toolbar__actions {
+      display: flex;
+      gap: var(--space-3);
+      align-items: center;
+    }
+
+    .bulk-action-btn {
+      padding: var(--space-2) var(--space-3);
+      font-size: 0.875rem;
+      border-radius: var(--radius-sm);
+      border: 1.5px solid var(--accent);
+      background: transparent;
+      color: var(--accent);
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+
+    .bulk-action-btn:hover {
+      background: var(--accent);
+      color: white;
+    }
+
+    .bulk-action-btn--secondary {
+      border-color: var(--text-tertiary);
+      color: var(--text-tertiary);
+    }
+
+    .bulk-action-btn--secondary:hover {
+      background: var(--text-tertiary);
+      color: white;
     }
 
     /* Action buttons */
@@ -910,6 +1064,71 @@
       background: var(--danger);
       color: white;
       border-color: var(--danger);
+    }
+
+    .btn-block {
+      color: var(--text-tertiary);
+      font-size: 0.7rem;
+    }
+
+    .btn-block:hover {
+      background: var(--danger);
+      color: white;
+      border-color: var(--danger);
+    }
+
+    /* Blocked company chips — red-tinted */
+    #pref-blocked-chips .chip {
+      background: rgba(229, 83, 75, 0.1);
+      border-color: var(--danger, #e5534b);
+      color: var(--danger, #e5534b);
+    }
+
+    #pref-blocked-chips .chip-remove {
+      color: var(--danger, #e5534b);
+    }
+
+    /* Refresh button */
+    #btn-refresh-feed {
+      position: relative;
+      min-width: 130px;
+      transition: all 0.2s ease;
+    }
+
+    #btn-refresh-feed.refreshing {
+      pointer-events: none;
+      opacity: 0.7;
+    }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    #btn-refresh-feed.refreshing::before {
+      content: '';
+      display: inline-block;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .refresh-toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--bg-surface);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius-md);
+      padding: var(--space-3) var(--space-4);
+      font-size: 0.875rem;
+      color: var(--text-primary);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+      z-index: 1000;
+      animation: slideUp 300ms ease-out;
+    }
+
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
     }
 
     /* Empty state */
@@ -1286,6 +1505,13 @@
                 <label><input type="checkbox" name="stage" value="Bootstrapped / Private"> Bootstrapped / Private</label>
               </div>
             </div>
+            <div class="form-group" style="grid-column: 1 / -1;">
+              <label>Blocked Companies <span style="font-weight: 400; color: var(--text-tertiary); font-size: 0.75rem;">(hidden from feed)</span></label>
+              <div class="chip-container" id="pref-blocked-chips" style="border-color: var(--danger, #e5534b);">
+                <input type="text" class="chip-input" id="pref-blocked-input" placeholder="Type a company name and press Enter">
+              </div>
+              <div style="font-size: 0.7rem; color: var(--text-tertiary); margin-top: 4px;">Jobs from blocked companies won't appear in your feed. Remove a chip to unblock.</div>
+            </div>
             <div class="form-actions" style="grid-column: 1 / -1;">
               <button class="btn btn-secondary" id="btn-cancel-prefs">Cancel</button>
               <button class="btn btn-primary" id="btn-save-prefs">Save Preferences</button>
@@ -1324,6 +1550,8 @@
         <div class="feed-header">
           <h1>Job Feed</h1>
           <div class="feed-controls">
+            <button class="btn btn-secondary" id="btn-refresh-feed" title="Pull latest jobs from server and re-score">↻ Refresh Feed</button>
+            <button class="btn btn-secondary" id="btn-reprocess-feed" title="Re-run pipeline: enrich JDs, extract salaries, re-score all items">⟳ Re-process</button>
             <button class="btn btn-primary" id="btn-preferences">⚙ Preferences</button>
           </div>
         </div>
@@ -1341,6 +1569,10 @@
           <div class="feed-stat" style="display: none;">
             <span class="feed-stat-label">Filtered:</span>
             <span class="feed-stat-value" id="stat-filtered">0</span>
+          </div>
+          <div class="feed-stat" id="stat-last-scan-container" style="display: none; margin-left: auto;">
+            <span class="feed-stat-label">Last email scan:</span>
+            <span class="feed-stat-value" id="stat-last-scan">—</span>
           </div>
         </div>
 
@@ -1411,6 +1643,21 @@
         <!-- Feed History -->
         <div id="feed-history" aria-live="polite"></div>
 
+        <!-- Bulk Actions Toolbar -->
+        <div id="bulk-toolbar" class="bulk-toolbar" style="display: none;">
+          <div class="bulk-toolbar__content">
+            <div class="bulk-toolbar__left">
+              <input type="checkbox" id="bulk-select-all" class="bulk-select-all" aria-label="Select all visible jobs">
+              <span class="bulk-toolbar__count" id="bulk-count">0 selected</span>
+            </div>
+            <div class="bulk-toolbar__actions">
+              <button class="bulk-action-btn" id="bulk-approve-btn" aria-label="Approve all selected jobs">✓ Approve All</button>
+              <button class="bulk-action-btn" id="bulk-dismiss-btn" aria-label="Dismiss all selected jobs">✕ Dismiss All</button>
+              <button class="bulk-action-btn bulk-action-btn--secondary" id="bulk-deselect-btn" aria-label="Deselect all">Deselect All</button>
+            </div>
+          </div>
+        </div>
+
         <!-- Feed List -->
         <div class="feed-list" id="feed-list" aria-live="polite"></div>
       </div>
@@ -1432,6 +1679,8 @@
   <script src="../shared/text-utils.js?v=3.10.1"></script>
   <script src="../shared/score-engine.js?v=3.10.1"></script>
   <script src="../shared/dedup-utils.js?v=3.10.1"></script>
+  <script src="../shared/email-parsers.js?v=4.0.0"></script>
+  <script src="../shared/feed-manager.js?v=3.10.1"></script>
   <script src="../shared/command-palette.js?v=3.10.1"></script>
 
   <!-- Module script -->

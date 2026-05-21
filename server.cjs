@@ -30,6 +30,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const { initTracing, getTracer, withSpan } = require("./tracing.cjs");
 
 /* ====== CONFIGURATION ====== */
 
@@ -955,7 +956,12 @@ function fetchUrl(urlStr, maxRedirects) {
     const urlObj = new URL(urlStr);
     const mod = urlObj.protocol === "https:" ? https : http;
 
-    const req = mod.get(urlObj, { timeout: 10000, headers: { "User-Agent": "Pathfinder-JD-Fetch/1.0" } }, (res) => {
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+    };
+    const req = mod.get(urlObj, { timeout: 10000, headers }, (res) => {
       /* Follow redirects */
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && maxRedirects > 0) {
         const redirectUrl = new URL(res.headers.location, urlStr).toString();
@@ -979,20 +985,483 @@ function fetchUrl(urlStr, maxRedirects) {
   });
 }
 
-/** Strip HTML tags and normalize whitespace */
+/** Strip HTML tags, preserve document structure, normalize whitespace */
 function htmlToText(html) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, " ")
-    .trim();
+  if (!html || typeof html !== 'string') return '';
+  let text = html;
+
+  // Remove script and style blocks
+  text = text.replace(/<script[\s\S]*?<\/script>/gi, "");
+  text = text.replace(/<style[\s\S]*?<\/style>/gi, "");
+
+  // Preserve structure: convert block elements to newlines
+  text = text.replace(/<\/(div|p|blockquote|h[1-6]|section|article)>/gi, "\n");
+  text = text.replace(/<(div|p|blockquote|h[1-6]|section|article)[^>]*>/gi, "\n");
+
+  // Preserve lists: convert li to bullet points (skip empty li)
+  text = text.replace(/<li[^>]*>\s*<\/li>/gi, "");
+  text = text.replace(/<li[^>]*>/gi, "\n• ");
+  text = text.replace(/<\/(li)>/gi, "");
+
+  // Preserve paragraph breaks for ul/ol
+  text = text.replace(/<\/(ul|ol)>/gi, "\n");
+  text = text.replace(/<(ul|ol)[^>]*>/gi, "\n");
+
+  // Convert br tags to newlines
+  text = text.replace(/<br\s*\/?>/gi, "\n");
+
+  // Convert hr tags to visual separators
+  text = text.replace(/<hr\s*\/?>/gi, "\n---\n");
+
+  // Remove all other HTML tags
+  text = text.replace(/<[^>]+>/g, " ");
+
+  // Decode HTML entities
+  text = text.replace(/&nbsp;/g, " ");
+  text = text.replace(/&amp;/g, "&");
+  text = text.replace(/&lt;/g, "<");
+  text = text.replace(/&gt;/g, ">");
+  text = text.replace(/&quot;/g, '"');
+  text = text.replace(/&#39;/g, "'");
+  text = text.replace(/&rsquo;/g, "\u2019");
+  text = text.replace(/&lsquo;/g, "\u2018");
+  text = text.replace(/&rdquo;/g, "\u201D");
+  text = text.replace(/&ldquo;/g, "\u201C");
+  text = text.replace(/&mdash;/g, "\u2014");
+  text = text.replace(/&ndash;/g, "\u2013");
+  text = text.replace(/&#\d+;/g, "");
+
+  // Normalize whitespace within lines (but preserve newlines)
+  text = text.replace(/[ \t]+/g, " ");
+  text = text.replace(/\n /g, "\n");
+  text = text.replace(/ \n/g, "\n");
+
+  // Remove lone bullet characters (empty list items that survived conversion)
+  text = text.replace(/\n•\s*\n/g, "\n");
+  text = text.replace(/\n•\s*$/gm, "");
+
+  // Remove lines that are only bullet/dash with no content
+  text = text.replace(/^\s*[•\-\*]\s*$/gm, "");
+
+  // Strip common page chrome / navigation artifacts from extracted JDs
+  const chromePatterns = [
+    /^\s*SIGN IN\s*$/gmi,
+    /^\s*JOIN NOW\s*$/gmi,
+    /^\s*LOG IN\s*$/gmi,
+    /^\s*APPLY\s*$/gmi,
+    /^\s*APPLY NOW\s*$/gmi,
+    /^\s*APPLY to similar jobs\s*$/gmi,
+    /^\s*Save\s*$/gm,
+    /^\s*Share\s*$/gm,
+    /^\s*Report this job\s*$/gmi,
+    /^\s*This job has closed\.?\s*$/gmi,
+    /^\s*This position has been filled\.?\s*$/gmi,
+    /^\s*No longer accepting applications\.?\s*$/gmi,
+    /^\s*Sign up to get notified\s*$/gmi,
+    /^\s*Create a job alert\s*$/gmi,
+    /^\s*Similar jobs\s*$/gmi,
+    /^\s*See who.*hired\s*$/gmi,
+    /^\s*People also viewed\s*$/gmi,
+    /^\s*Set alert\s*$/gmi,
+    /^\s*Show more\s*$/gmi,
+    /^\s*Show less\s*$/gmi,
+    /^\s*Easy Apply\s*$/gmi,
+    /^\s*Be an early applicant\s*$/gmi,
+    /^\s*Reposted\s*$/gmi,
+    /^\s*Get AI-powered advice\s*$/gmi,
+    /^\s*Am I a good fit.*\?\s*$/gmi,
+    /^\s*Referrals increase your chances.*$/gmi,
+    /^\s*Get notified about new.*$/gmi,
+  ];
+  for (const pattern of chromePatterns) {
+    text = text.replace(pattern, "");
+  }
+
+  text = text.replace(/\n{3,}/g, "\n\n");
+
+  return text.trim();
+}
+
+/**
+ * Extract the actual job description from LinkedIn's page text,
+ * stripping navigation chrome, login prompts, and related job listings.
+ * LinkedIn public job pages embed the JD between identifiable patterns.
+ */
+function extractLinkedInJD(rawText) {
+  if (!rawText || typeof rawText !== 'string') return '';
+  const lines = rawText.split("\n");
+
+  // Strategy: find the first substantive content block after the boilerplate.
+  // LinkedIn pages repeat the title/company/location at the top with nav,
+  // then have login prompts, then the actual JD starts with the company
+  // description or "About the role" type content.
+
+  // Find start: look for first line > 100 chars that isn't a known boilerplate pattern
+  const boilerplatePatterns = [
+    /linkedin/i, /skip to main/i, /sign in/i, /join now/i, /join to apply/i,
+    /user agreement/i, /privacy policy/i, /cookie policy/i, /expand search/i,
+    /clear text/i, /ai-powered advice/i, /evaluate your skills/i,
+    /currently selected search/i, /forgot password/i, /search options/i,
+  ];
+
+  let startIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.length < 80) continue;
+    const isBoilerplate = boilerplatePatterns.some(p => p.test(line));
+    if (!isBoilerplate) {
+      startIdx = i;
+      break;
+    }
+  }
+
+  if (startIdx < 0) return rawText; // Couldn't find JD, return as-is
+
+  // Find end: look for "Referrals increase your chances" or "Get notified about new"
+  // or "Similar jobs" or "People also viewed" — these mark the end of the JD
+  const endPatterns = [
+    /referrals increase/i, /get notified about new/i, /similar jobs/i,
+    /people also viewed/i, /show more jobs/i, /explore collaborative/i,
+    /set alert/i, /you may also like/i,
+  ];
+
+  let endIdx = lines.length;
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (endPatterns.some(p => p.test(line))) {
+      endIdx = i;
+      break;
+    }
+  }
+
+  const jdLines = lines.slice(startIdx, endIdx).filter(l => {
+    const t = l.trim();
+    if (!t) return false;
+    // Remove remaining short boilerplate lines
+    if (boilerplatePatterns.some(p => p.test(t))) return false;
+    if (t === "•" || t === "Apply" || t === "Save" || t === "Show" || t === "or") return false;
+    if (/^(Email|Password|Report this job)$/i.test(t)) return false;
+    return true;
+  });
+
+  const result = jdLines.join("\n").trim();
+  return result.length > 50 ? result : rawText; // Fall back if extraction failed
+}
+
+/* ================================================================
+ * WEB SEARCH FALLBACK
+ * ================================================================
+ * When a direct URL fetch fails (LinkedIn blocked, empty JD, etc.),
+ * search DuckDuckGo for the job by company+title and try to fetch
+ * from a scrapable site (Greenhouse, Lever, Ashby, etc.).
+ * ================================================================ */
+
+/** Domains we know are scrapable, ranked by preference (best first). */
+const SCRAPABLE_DOMAINS = [
+  { pattern: 'greenhouse.io', label: 'Greenhouse' },
+  { pattern: 'lever.co', label: 'Lever' },
+  { pattern: 'ashbyhq.com', label: 'Ashby' },
+  { pattern: 'myworkdayjobs.com', label: 'Workday' },
+  { pattern: 'jobs.smartrecruiters.com', label: 'SmartRecruiters' },
+  { pattern: 'careers.', label: 'Company Careers' },
+  { pattern: 'jobs.', label: 'Company Jobs' },
+  { pattern: 'indeed.com', label: 'Indeed' },
+  { pattern: 'glassdoor.com', label: 'Glassdoor' },
+  { pattern: 'builtin.com', label: 'BuiltIn' },
+  { pattern: 'wellfound.com', label: 'Wellfound' },
+  { pattern: 'ziprecruiter.com', label: 'ZipRecruiter' },
+];
+
+/** Domains to skip — they block us or need auth. */
+const SEARCH_BLOCKED_DOMAINS = [
+  'linkedin.com', 'facebook.com', 'twitter.com', 'x.com',
+  'instagram.com', 'tiktok.com', 'youtube.com',
+  'duckduckgo.com', 'google.com', 'bing.com', 'brave.com',
+];
+
+/**
+ * Search DuckDuckGo HTML for job postings matching company + title.
+ * Uses the HTML-only endpoint which returns server-rendered results.
+ *
+ * @param {string} company - Company name.
+ * @param {string} title - Job title.
+ * @returns {Promise<Array<{ url: string, title: string }>>}
+ */
+/**
+ * Search Brave for job postings. Brave returns server-rendered HTML
+ * with parseable result links (unlike Google/Bing which need JS).
+ *
+ * @param {string} company - Company name.
+ * @param {string} title - Job title.
+ * @returns {Promise<Array<{ url: string, title: string }>>}
+ */
+function searchBrave(company, title) {
+  const query = `"${company}" "${title}" job`;
+  const encodedQuery = encodeURIComponent(query);
+
+  return new Promise((resolve) => {
+    const urlObj = new URL(`https://search.brave.com/search?q=${encodedQuery}&source=web`);
+
+    https.get(urlObj, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'identity',
+      },
+      timeout: 15000,
+    }, (res) => {
+      // Follow one redirect
+      if ([301, 302, 303].includes(res.statusCode) && res.headers.location) {
+        const rUrl = res.headers.location.startsWith('http')
+          ? res.headers.location
+          : `https://search.brave.com${res.headers.location}`;
+        https.get(rUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9', 'Accept-Encoding': 'identity',
+          },
+          timeout: 15000,
+        }, (res2) => {
+          const chunks = [];
+          res2.on('data', c => chunks.push(c));
+          res2.on('end', () => {
+            try { resolve(_parseBraveResults(Buffer.concat(chunks).toString('utf-8'))); }
+            catch (err) { console.warn(`[search-fallback] Brave redirect parse error: ${err.message}`); resolve([]); }
+          });
+          res2.on('error', () => resolve([]));
+        }).on('error', () => resolve([]));
+        return;
+      }
+
+      if (res.statusCode === 429) {
+        console.warn(`[search-fallback] Brave rate-limited (429)`);
+        resolve([]);
+        res.resume(); // drain
+        return;
+      }
+
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        try {
+          const html = Buffer.concat(chunks).toString('utf-8');
+          const results = _parseBraveResults(html);
+          console.log(`[search-fallback] Brave returned ${results.length} results for "${company}"`);
+          resolve(results);
+        } catch (err) {
+          console.warn(`[search-fallback] Brave parse error: ${err.message}`);
+          resolve([]);
+        }
+      });
+      res.on('error', () => resolve([]));
+    }).on('error', (e) => {
+      console.warn(`[search-fallback] Brave request error: ${e.message}`);
+      resolve([]);
+    }).on('timeout', function() { this.destroy(); resolve([]); });
+  });
+}
+
+/**
+ * Parse Brave Search HTML into structured result entries.
+ * Brave uses server-rendered HTML with external links that we can extract.
+ */
+function _parseBraveResults(html) {
+  const seenUrls = new Set();
+  const results = [];
+
+  // Brave internal/CDN domains to skip
+  const skipDomains = ['search.brave.com', 'brave.com', 'cdn.search', 'imgs.search',
+    'tiles.search', 'safebrowsing', 'brave.software'];
+
+  // Extract all external links from the page
+  const linkRegex = /href="(https?:\/\/[^"]+)"/gi;
+  let match;
+  while ((match = linkRegex.exec(html)) !== null) {
+    const url = match[1];
+
+    // Skip Brave internal, assets, and already-seen URLs
+    if (skipDomains.some(d => url.includes(d))) continue;
+    if (url.match(/\.(css|js|woff2?|png|svg|ico|jpg|jpeg|gif|webp)(\?|$)/)) continue;
+    if (seenUrls.has(url)) continue;
+    seenUrls.add(url);
+
+    // Try to extract a title from nearby text (within 500 chars after the href)
+    const afterIdx = match.index;
+    const snippet = html.substring(afterIdx, afterIdx + 500);
+    const titleMatch = snippet.match(/>([^<]{10,120})</);
+    const title = titleMatch ? titleMatch[1].trim() : '';
+
+    results.push({ url, title });
+  }
+
+  return results;
+}
+
+/**
+ * Search DuckDuckGo HTML for job postings (backup search engine).
+ */
+function searchDuckDuckGo(company, title) {
+  const query = `"${company}" "${title}" job`;
+  const postData = `q=${encodeURIComponent(query)}`;
+
+  return new Promise((resolve) => {
+    const options = {
+      hostname: 'html.duckduckgo.com',
+      path: '/html/',
+      method: 'POST',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(postData),
+        'Accept': 'text/html',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        try {
+          const html = Buffer.concat(chunks).toString('utf-8');
+          const results = [];
+
+          const linkRegex = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+          let match;
+          while ((match = linkRegex.exec(html)) !== null) {
+            const rawHref = match[1];
+            const rawTitle = match[2].replace(/<[^>]+>/g, '').trim();
+
+            let realUrl = null;
+            const uddgMatch = rawHref.match(/[?&]uddg=([^&]+)/);
+            if (uddgMatch) {
+              realUrl = decodeURIComponent(uddgMatch[1]);
+            } else if (rawHref.startsWith('http')) {
+              realUrl = rawHref;
+            } else if (rawHref.startsWith('//')) {
+              realUrl = 'https:' + rawHref;
+            }
+
+            if (realUrl) results.push({ url: realUrl, title: rawTitle });
+          }
+          console.log(`[search-fallback] DDG returned ${results.length} results for "${company}"`);
+          resolve(results);
+        } catch (err) {
+          console.warn(`[search-fallback] DDG parse error: ${err.message}`);
+          resolve([]);
+        }
+      });
+      res.on('error', () => resolve([]));
+    });
+
+    req.on('error', () => resolve([]));
+    req.setTimeout(8000, () => { req.destroy(); resolve([]); });
+
+    req.write(postData);
+    req.end();
+  });
+}
+
+/**
+ * Search for an alternative JD source when the primary URL fails.
+ *
+ * Search cascade: Brave first (server-rendered HTML), then DuckDuckGo as backup.
+ * Filter out blocked domains, rank by scrapable preference, fetch candidates.
+ *
+ * @param {string} company - Company name.
+ * @param {string} title - Job title.
+ * @returns {Promise<{
+ *   success: boolean, text: string|null, sourceUrl: string|null,
+ *   sourceDomain: string|null, searchQuery: string,
+ *   resultsFound: number, resultsTried: number, error: string|null,
+ *   searchEngine: string|null
+ * }>}
+ */
+async function searchAlternativeJD(company, title) {
+  const searchQuery = `"${company}" "${title}" job`;
+
+  if (!company || !title) {
+    return { success: false, text: null, sourceUrl: null, sourceDomain: null,
+      searchQuery, resultsFound: 0, resultsTried: 0,
+      error: 'Missing company or title for search fallback' };
+  }
+
+  // Step 1: Search — try Brave first (server-rendered HTML), fall back to DDG
+  let rawResults = await searchBrave(company, title);
+  let searchEngine = 'brave';
+
+  if (rawResults.length === 0) {
+    console.log(`[search-fallback] Brave returned 0 results, trying DDG...`);
+    rawResults = await searchDuckDuckGo(company, title);
+    searchEngine = 'ddg';
+  }
+  if (rawResults.length === 0) {
+    return { success: false, text: null, sourceUrl: null, sourceDomain: null,
+      searchQuery, resultsFound: 0, resultsTried: 0,
+      error: 'No search results found' };
+  }
+
+  // Step 2: Filter blocked domains, rank by scrapability
+  const candidates = rawResults
+    .filter(r => !SEARCH_BLOCKED_DOMAINS.some(d => r.url.toLowerCase().includes(d)))
+    .map(r => {
+      let rank = 999, label = 'Unknown';
+      const lower = r.url.toLowerCase();
+      for (let i = 0; i < SCRAPABLE_DOMAINS.length; i++) {
+        if (lower.includes(SCRAPABLE_DOMAINS[i].pattern)) {
+          rank = i;
+          label = SCRAPABLE_DOMAINS[i].label;
+          break;
+        }
+      }
+      return { ...r, rank, label };
+    })
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, 5);
+
+  if (candidates.length === 0) {
+    return { success: false, text: null, sourceUrl: null, sourceDomain: null,
+      searchQuery, resultsFound: rawResults.length, resultsTried: 0,
+      error: 'All search results are from blocked domains' };
+  }
+
+  // Step 3: Try fetching candidates
+  let resultsTried = 0;
+  for (const candidate of candidates) {
+    resultsTried++;
+    try {
+      const html = await fetchUrl(candidate.url);
+      const text = htmlToText(html);
+
+      if (text && text.length >= 200) {
+        const lower = text.toLowerCase();
+        const hasJobSignals =
+          lower.includes('responsibilities') || lower.includes('qualifications') ||
+          lower.includes('requirements') || lower.includes('experience') ||
+          lower.includes('about the role') || lower.includes('what you') ||
+          lower.includes('we are looking') || lower.includes('job description') ||
+          lower.includes('apply');
+
+        if (hasJobSignals) {
+          let hostname = '';
+          try { hostname = new URL(candidate.url).hostname; } catch {}
+          return {
+            success: true, text, sourceUrl: candidate.url,
+            sourceDomain: candidate.label, sourceHostname: hostname,
+            searchQuery, searchEngine, resultsFound: rawResults.length, resultsTried,
+            error: null,
+          };
+        }
+      }
+    } catch (err) {
+      console.warn(`[search-fallback] Fetch failed for ${candidate.url}: ${err.message}`);
+    }
+  }
+
+  return { success: false, text: null, sourceUrl: null, sourceDomain: null,
+    searchQuery, resultsFound: rawResults.length, resultsTried,
+    error: `Tried ${resultsTried} candidates, none returned a usable JD` };
 }
 
 /* ================================================================
@@ -1018,10 +1487,20 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://localhost:${PORT}`);
   const pathname = url.pathname;
 
+  /* ── Root span for every API request (skip static files for noise reduction) ── */
+  const isApiRoute = pathname.startsWith('/api/') || pathname.startsWith('/data/');
+  const rootSpan = isApiRoute ? serverTracer.startSpan(`${req.method} ${pathname}`) : null;
+  if (rootSpan) {
+    rootSpan.setAttribute('http.method', req.method);
+    rootSpan.setAttribute('http.url', pathname);
+  }
+
   try {
 
     /* ── HEALTH CHECK ── */
     if (req.method === "GET" && (pathname === "/api/health" || pathname === "/health")) {
+      const { isPhoenixHealthy } = require('./tracing.cjs');
+      const phoenixHealthy = await isPhoenixHealthy();
       sendJSON(res, 200, {
         status: "ok",
         server: "pathfinder-combined",
@@ -1032,6 +1511,7 @@ const server = http.createServer(async (req, res) => {
           artifacts: true,
           citations: true,
           briefs: true,
+          tracing: phoenixHealthy,
           backup: true,
           jdFetch: true,
           embeddings: embeddingReady,
@@ -1363,22 +1843,554 @@ const server = http.createServer(async (req, res) => {
      * ================================================================ */
 
     /* ── POST /api/fetch-jd — Fetch job description from URL ── */
+    /*
+     * Request body:
+     *   { url: string, company?: string, title?: string }
+     *
+     * Fetch cascade:
+     *   1. Direct fetch (or LinkedIn guest API for linkedin.com URLs)
+     *   2. If step 1 fails AND company+title provided → DuckDuckGo search fallback
+     *   3. Return best result with source metadata
+     */
     if (req.method === "POST" && pathname === "/api/fetch-jd") {
       const body = await parseBody(req);
       if (!body.url) { sendJSON(res, 400, { error: "url is required" }); return; }
 
+      const isLinkedIn = body.url.includes('linkedin.com');
+      const hasSearchParams = !!(body.company && body.title);
+      if (rootSpan) {
+        rootSpan.setAttribute('jd.url', body.url);
+        rootSpan.setAttribute('jd.isLinkedIn', isLinkedIn);
+        rootSpan.setAttribute('jd.hasSearchParams', hasSearchParams);
+        if (body.company) rootSpan.setAttribute('jd.company', body.company);
+        if (body.title) rootSpan.setAttribute('jd.title', body.title);
+      }
+
       try {
-        const html = await fetchUrl(body.url);
-        const text = htmlToText(html);
-        const finalText = text.length > 15000 ? text.substring(0, 15000) + "...[truncated]" : text;
-        sendJSON(res, 200, {
+        let text = null;
+        let primaryFailed = false;
+        let primaryFailReason = null;
+
+        /* ── STEP 1: Primary fetch ── */
+        if (isLinkedIn) {
+          const jobIdMatch = body.url.match(/\/jobs\/view\/(\d+)/i)
+            || body.url.match(/[?&]currentJobId=(\d+)/i);
+          const jobId = jobIdMatch ? jobIdMatch[1] : null;
+          if (rootSpan) rootSpan.setAttribute('jd.linkedInJobId', jobId || 'none');
+
+          if (jobId) {
+            const guestUrl = `https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/${jobId}`;
+            if (rootSpan) rootSpan.setAttribute('jd.guestUrl', guestUrl);
+
+            try {
+              const html = await fetchUrl(guestUrl);
+              const lower = (html || '').toLowerCase();
+              const isBlocked = !html || html.length < 200
+                || lower.includes('authwall') || lower.includes('sign in');
+
+              if (isBlocked) {
+                primaryFailed = true;
+                primaryFailReason = 'LinkedIn blocked (auth wall or empty response)';
+                if (rootSpan) rootSpan.setAttribute('jd.linkedInBlocked', true);
+              } else {
+                const descMatch = html.match(/<div[^>]*class="[^"]*show-more-less-html__markup[^"]*"[^>]*>([\s\S]*?)<\/div>/i)
+                  || html.match(/<div[^>]*class="[^"]*description__text[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+                if (descMatch) {
+                  text = htmlToText(descMatch[1]);
+                } else {
+                  text = extractLinkedInJD(htmlToText(html));
+                }
+              }
+            } catch (err) {
+              primaryFailed = true;
+              primaryFailReason = `LinkedIn fetch error: ${err.message}`;
+            }
+          } else {
+            if (rootSpan) rootSpan.setAttribute('jd.linkedInNoJobId', true);
+            try {
+              const html = await fetchUrl(body.url);
+              text = extractLinkedInJD(htmlToText(html));
+            } catch (err) {
+              primaryFailed = true;
+              primaryFailReason = `LinkedIn direct fetch error: ${err.message}`;
+            }
+          }
+        } else {
+          /* ── Non-LinkedIn: standard direct fetch ── */
+          try {
+            const html = await fetchUrl(body.url);
+            text = htmlToText(html);
+          } catch (err) {
+            primaryFailed = true;
+            primaryFailReason = `Direct fetch error: ${err.message}`;
+          }
+        }
+
+        // Check if primary fetch yielded usable text
+        const primaryEmpty = !text || text.length < 50;
+        if (primaryEmpty && !primaryFailed) {
+          primaryFailed = true;
+          primaryFailReason = primaryFailReason || 'Primary fetch returned empty/insufficient text';
+        }
+
+        if (rootSpan) {
+          rootSpan.setAttribute('jd.primaryFailed', primaryFailed);
+          if (primaryFailReason) rootSpan.setAttribute('jd.primaryFailReason', primaryFailReason);
+        }
+
+        /* ── STEP 2: Web search fallback ── */
+        let usedFallback = false;
+        let fallbackResult = null;
+
+        if (primaryFailed && hasSearchParams) {
+          if (rootSpan) rootSpan.setAttribute('jd.fallbackAttempted', true);
+          console.log(`[fetch-jd] Fallback: searching DDG for "${body.company}" "${body.title}"`);
+
+          fallbackResult = await searchAlternativeJD(body.company, body.title);
+          console.log(`[fetch-jd] Fallback result: success=${fallbackResult.success}, resultsFound=${fallbackResult.resultsFound}, resultsTried=${fallbackResult.resultsTried}, error=${fallbackResult.error}`);
+
+          if (rootSpan) {
+            rootSpan.setAttribute('jd.fallback.success', fallbackResult.success);
+            rootSpan.setAttribute('jd.fallback.searchQuery', fallbackResult.searchQuery);
+            rootSpan.setAttribute('jd.fallback.resultsFound', fallbackResult.resultsFound);
+            rootSpan.setAttribute('jd.fallback.resultsTried', fallbackResult.resultsTried);
+            if (fallbackResult.sourceDomain) rootSpan.setAttribute('jd.fallback.sourceDomain', fallbackResult.sourceDomain);
+            if (fallbackResult.sourceUrl) rootSpan.setAttribute('jd.fallback.sourceUrl', fallbackResult.sourceUrl);
+            if (fallbackResult.error) rootSpan.setAttribute('jd.fallback.error', fallbackResult.error);
+          }
+
+          if (fallbackResult.success) {
+            text = fallbackResult.text;
+            usedFallback = true;
+          }
+        }
+
+        /* ── STEP 3: Finalize and respond ── */
+        const finalText = text && text.length > 15000 ? text.substring(0, 15000) + "...[truncated]" : text;
+        const charCount = finalText ? finalText.length : 0;
+        const isEmpty = !finalText || charCount < 50;
+
+        if (rootSpan) {
+          rootSpan.setAttribute('http.status_code', 200);
+          rootSpan.setAttribute('jd.charCount', charCount);
+          rootSpan.setAttribute('jd.truncated', text && text.length > 15000);
+          rootSpan.setAttribute('jd.empty', isEmpty);
+          rootSpan.setAttribute('jd.usedFallback', usedFallback);
+          if (isEmpty) {
+            rootSpan.setAttribute('jd.error', primaryFailReason || 'Empty JD after all attempts');
+            rootSpan.setStatus({ code: 2 /* ERROR */, message: 'Empty JD' });
+          } else {
+            rootSpan.setStatus({ code: 1 /* OK */ });
+          }
+        }
+
+        const response = {
           text: finalText,
           url: body.url,
           fetchedAt: new Date().toISOString(),
-          charCount: finalText.length,
+          charCount,
+        };
+
+        // Include fallback metadata so the pipeline can track provenance
+        if (usedFallback && fallbackResult) {
+          response.fallback = true;
+          response.fallbackSourceUrl = fallbackResult.sourceUrl;
+          response.fallbackSourceDomain = fallbackResult.sourceDomain;
+        }
+        if (primaryFailed && !usedFallback) {
+          response.linkedInBlocked = isLinkedIn;
+          response.primaryFailReason = primaryFailReason;
+          if (fallbackResult) {
+            response.fallbackError = fallbackResult.error;
+            response.fallbackResultsFound = fallbackResult.resultsFound;
+            response.fallbackResultsTried = fallbackResult.resultsTried;
+          }
+        }
+
+        sendJSON(res, 200, response);
+      } catch (err) {
+        if (rootSpan) {
+          rootSpan.setAttribute('http.status_code', 400);
+          rootSpan.setAttribute('jd.error', err.message);
+        }
+        sendJSON(res, 400, { error: err.message, url: body.url });
+      }
+      return;
+    }
+
+    /* ================================================================
+     * FEED PIPELINE ENDPOINT
+     * ================================================================ */
+
+    /* ── POST /api/feed/process — Run server-side feed pipeline ── */
+    if (req.method === "POST" && pathname === "/api/feed/process") {
+      const body = await parseBody(req);
+      if (rootSpan) {
+        rootSpan.setAttribute('feed.forceRescore', !!body.forceRescore);
+        rootSpan.setAttribute('feed.forceExtract', !!body.forceExtract);
+      }
+      const args = ['scripts/feed-pipeline.js', '--port', String(PORT)];
+      if (body.forceRescore) args.push('--force-rescore');
+      if (body.forceExtract) args.push('--force-extract');
+
+      const { execFile } = require('child_process');
+      const scriptPath = path.join(SERVE_DIR, 'scripts', 'feed-pipeline.js');
+
+      try {
+        // Check script exists
+        if (!fs.existsSync(scriptPath)) {
+          sendJSON(res, 404, { error: 'Feed pipeline script not found', path: scriptPath });
+          return;
+        }
+
+        execFile('node', [scriptPath, '--port', String(PORT),
+          ...(body.forceRescore ? ['--force-rescore'] : []),
+          ...(body.forceExtract ? ['--force-extract'] : [])
+        ], { timeout: 120000, cwd: SERVE_DIR }, (err, stdout, stderr) => {
+          if (err) {
+            console.error('[Feed Pipeline] Script error:', err.message);
+            sendJSON(res, 500, {
+              error: 'Pipeline failed',
+              message: err.message,
+              stderr: stderr ? stderr.substring(0, 500) : '',
+            });
+            return;
+          }
+
+          // Parse stats from the last line of stdout
+          const lines = stdout.trim().split('\n');
+          const resultLine = lines.find(l => l.startsWith('PIPELINE_RESULT:'));
+          let stats = null;
+          if (resultLine) {
+            try {
+              stats = JSON.parse(resultLine.replace('PIPELINE_RESULT:', ''));
+            } catch (e) { /* ignore parse errors */ }
+          }
+
+          console.log('[Feed Pipeline] Completed:', stats ? JSON.stringify(stats) : 'no stats');
+          sendJSON(res, 200, {
+            ok: true,
+            stats,
+            output: stdout.substring(0, 2000),
+          });
         });
       } catch (err) {
-        sendJSON(res, 400, { error: err.message, url: body.url });
+        console.error('[Feed Pipeline] Launch error:', err);
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    /* ── GET /api/resumes — List archived resume PDFs ── */
+    if (req.method === "GET" && pathname === "/api/resumes") {
+      const resumeDir = path.join(SERVE_DIR, 'skills', 'resume-agent', 'examples');
+      try {
+        const files = fs.readdirSync(resumeDir).filter(f => f.endsWith('.pdf'));
+        const resumes = files.map(f => {
+          const stat = fs.statSync(path.join(resumeDir, f));
+          // Extract company from filename: Ili_Selinger_Resume_CompanyName.pdf
+          const match = f.match(/Resume_(.+)\.pdf$/);
+          const company = match ? match[1].replace(/_/g, ' ') : 'General';
+          return {
+            filename: f,
+            company,
+            url: `/skills/resume-agent/examples/${encodeURIComponent(f)}`,
+            size: stat.size,
+            modified: stat.mtime.toISOString(),
+          };
+        });
+        sendJSON(res, 200, { resumes });
+      } catch (err) {
+        sendJSON(res, 200, { resumes: [], error: err.message });
+      }
+      return;
+    }
+
+    /* ================================================================
+     * RESUME REQUEST QUEUE (/api/resume-requests/*)
+     * ================================================================
+     * Manages resume generation requests. Pathfinder UI creates requests,
+     * Cowork scheduled task picks them up and processes them.
+     * ================================================================ */
+
+    const RESUME_REQUESTS_DIR = path.join(DATA_DIR, "resume-requests");
+    const GENERATED_RESUMES_DIR = path.join(DATA_DIR, "generated-resumes");
+
+    /* ── GET /api/resume-requests — List all resume requests ── */
+    if (req.method === "GET" && pathname === "/api/resume-requests") {
+      try {
+        fs.mkdirSync(RESUME_REQUESTS_DIR, { recursive: true });
+        const files = fs.readdirSync(RESUME_REQUESTS_DIR).filter(f => f.endsWith('.json'));
+        const requests = files.map(f => {
+          try {
+            return JSON.parse(fs.readFileSync(path.join(RESUME_REQUESTS_DIR, f), 'utf8'));
+          } catch (e) { return null; }
+        }).filter(Boolean);
+        sendJSON(res, 200, { requests });
+      } catch (err) {
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    /* ── GET /api/resume-requests/:id — Get a single request ── */
+    if (req.method === "GET" && pathname.startsWith("/api/resume-requests/") && !pathname.includes("/api/resume-requests/pending")) {
+      const id = pathname.split("/api/resume-requests/")[1];
+      try {
+        const filePath = path.join(RESUME_REQUESTS_DIR, `${id}.json`);
+        if (!fs.existsSync(filePath)) { sendJSON(res, 404, { error: "Not found" }); return; }
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        sendJSON(res, 200, data);
+      } catch (err) {
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    /* ── POST /api/resume-requests — Create a new resume request ── */
+    if (req.method === "POST" && pathname === "/api/resume-requests") {
+      const body = await parseBody(req);
+      try {
+        fs.mkdirSync(RESUME_REQUESTS_DIR, { recursive: true });
+        const id = `resume_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const request = {
+          id,
+          roleId: body.roleId,
+          company: body.company || 'Unknown',
+          title: body.title || 'Unknown',
+          location: body.location || '',
+          salary: body.salary || '',
+          jd: body.jd || '',
+          applicationType: body.applicationType || 'cold',
+          fitAssessment: body.fitAssessment || null,
+          scoring: body.scoring || null,
+          score: body.score || 0,
+          status: 'pending',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          pdfPath: null,
+          pdfFilename: null,
+        };
+        fs.writeFileSync(path.join(RESUME_REQUESTS_DIR, `${id}.json`), JSON.stringify(request, null, 2));
+
+        // Also update a quick-lookup queue file for the scheduled task
+        const queueFile = path.join(DATA_DIR, 'pf_resume_queue.json');
+        let queue = [];
+        try {
+          if (fs.existsSync(queueFile)) {
+            const raw = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+            queue = JSON.parse(raw.value || '[]');
+          }
+        } catch (e) {}
+        queue.push({ id, roleId: body.roleId, company: body.company, status: 'pending', createdAt: Date.now() });
+        fs.writeFileSync(queueFile, JSON.stringify({
+          key: 'pf_resume_queue',
+          value: JSON.stringify(queue),
+          updatedAt: new Date().toISOString(),
+          sizeBytes: 0,
+        }, null, 2));
+
+        sendJSON(res, 201, { id, status: 'pending', message: 'Resume request queued' });
+      } catch (err) {
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    /* ── PUT /api/resume-requests/:id — Update request status ── */
+    if (req.method === "PUT" && pathname.startsWith("/api/resume-requests/")) {
+      const id = pathname.split("/api/resume-requests/")[1];
+      const body = await parseBody(req);
+      try {
+        const filePath = path.join(RESUME_REQUESTS_DIR, `${id}.json`);
+        if (!fs.existsSync(filePath)) { sendJSON(res, 404, { error: "Not found" }); return; }
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        if (body.status) data.status = body.status;
+        if (body.pdfPath) data.pdfPath = body.pdfPath;
+        if (body.pdfFilename) data.pdfFilename = body.pdfFilename;
+        if (body.error) data.error = body.error;
+        data.updatedAt = Date.now();
+        fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+        sendJSON(res, 200, data);
+      } catch (err) {
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    /* ── GET /api/generated-resumes/:filename — Serve generated PDF ── */
+    if (req.method === "GET" && pathname.startsWith("/api/generated-resumes/")) {
+      const filename = decodeURIComponent(pathname.split("/api/generated-resumes/")[1]);
+      try {
+        fs.mkdirSync(GENERATED_RESUMES_DIR, { recursive: true });
+        const filePath = path.join(GENERATED_RESUMES_DIR, filename);
+        if (!fs.existsSync(filePath)) { sendJSON(res, 404, { error: "Resume not found" }); return; }
+        const stat = fs.statSync(filePath);
+        res.writeHead(200, {
+          "Content-Type": "application/pdf",
+          "Content-Length": stat.size,
+          "Content-Disposition": `inline; filename="${filename}"`,
+          "Access-Control-Allow-Origin": "*",
+        });
+        fs.createReadStream(filePath).pipe(res);
+      } catch (err) {
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    /* ── GET /api/role-resumes/:roleId — List resumes for a specific role ── */
+    if (req.method === "GET" && pathname.startsWith("/api/role-resumes/")) {
+      const roleId = pathname.split("/api/role-resumes/")[1];
+      try {
+        fs.mkdirSync(RESUME_REQUESTS_DIR, { recursive: true });
+        const files = fs.readdirSync(RESUME_REQUESTS_DIR).filter(f => f.endsWith('.json'));
+        const roleResumes = files.map(f => {
+          try { return JSON.parse(fs.readFileSync(path.join(RESUME_REQUESTS_DIR, f), 'utf8')); }
+          catch (e) { return null; }
+        }).filter(r => r && r.roleId === roleId).sort((a, b) => b.createdAt - a.createdAt);
+        sendJSON(res, 200, { resumes: roleResumes });
+      } catch (err) {
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    /* ── POST /api/generate-resume — Direct resume generation (no queue) ── */
+    if (req.method === "POST" && pathname === "/api/generate-resume") {
+      const body = await parseBody(req);
+      try {
+        // Clear require cache so code changes take effect without server restart
+        const resumeGenPath = require.resolve('./resume-generator.cjs');
+        delete require.cache[resumeGenPath];
+        const { generateResume } = require('./resume-generator.cjs');
+        if (rootSpan) {
+          rootSpan.setAttribute('resume.company', body.company || 'Unknown');
+          rootSpan.setAttribute('resume.title', body.title || 'Unknown');
+          rootSpan.setAttribute('resume.applicationType', body.applicationType || 'cold');
+          rootSpan.setAttribute('resume.jdLength', (body.jd || '').length);
+        }
+        const result = await generateResume({
+          company: body.company || 'Unknown',
+          title: body.title || 'Unknown',
+          jd: body.jd || '',
+          applicationType: body.applicationType || 'cold',
+          fitAssessment: body.fitAssessment || null,
+          scoring: body.scoring || null,
+          dataDir: DATA_DIR,
+        });
+
+        // Also save a resume request record for history tracking
+        const RESUME_REQ_DIR = path.join(DATA_DIR, "resume-requests");
+        fs.mkdirSync(RESUME_REQ_DIR, { recursive: true });
+        const id = `resume_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const record = {
+          id,
+          roleId: body.roleId || '',
+          company: body.company || 'Unknown',
+          title: body.title || 'Unknown',
+          jd: body.jd || '',
+          applicationType: body.applicationType || 'cold',
+          fitAssessment: body.fitAssessment || null,
+          scoring: body.scoring || null,
+          score: body.score || 0,
+          status: 'completed',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          pdfPath: result.pdfPath,
+          pdfFilename: result.pdfFilename,
+          domain: result.domain,
+          pageCount: result.pageCount,
+          bulletsSelected: result.bulletsSelected,
+        };
+        fs.writeFileSync(path.join(RESUME_REQ_DIR, `${id}.json`), JSON.stringify(record, null, 2));
+
+        const outputFilename = result.outputFilename || result.pdfFilename;
+        if (rootSpan) {
+          rootSpan.setAttribute('http.status_code', 200);
+          rootSpan.setAttribute('resume.domain', result.domain || 'unknown');
+          rootSpan.setAttribute('resume.pageCount', result.pageCount || 0);
+          rootSpan.setAttribute('resume.bulletsSelected', result.bulletsSelected || 0);
+          rootSpan.setAttribute('resume.outputFormat', result.outputFormat || 'pdf');
+          rootSpan.setStatus({ code: 1 /* OK */ });
+        }
+        sendJSON(res, 200, {
+          success: true,
+          id,
+          pdfFilename: result.pdfFilename,
+          docxFilename: result.docxFilename,
+          outputFilename,
+          outputFormat: result.outputFormat || 'pdf',
+          pdfUrl: result.pdfFilename ? `/api/generated-resumes/${encodeURIComponent(result.pdfFilename)}` : null,
+          docxUrl: result.docxFilename ? `/api/generated-resumes/${encodeURIComponent(result.docxFilename)}` : null,
+          downloadUrl: `/api/generated-resumes/${encodeURIComponent(outputFilename)}`,
+          domain: result.domain,
+          pageCount: result.pageCount,
+          bulletsSelected: result.bulletsSelected,
+          jdKeywordsMatched: result.jdKeywordsMatched,
+        });
+      } catch (err) {
+        console.error('[Server] Resume generation failed:', err);
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    /* ================================================================
+     * OUTREACH REQUEST QUEUE (/api/outreach-requests/*)
+     * ================================================================
+     * Manages outreach message drafting requests. Pathfinder UI creates
+     * requests, Cowork scheduled task picks them up and generates messages.
+     * ================================================================ */
+
+    const OUTREACH_REQUESTS_DIR = path.join(DATA_DIR, "outreach-requests");
+
+    /* ── POST /api/outreach-requests — Create a new outreach request ── */
+    if (req.method === "POST" && pathname === "/api/outreach-requests") {
+      const body = await parseBody(req);
+      try {
+        fs.mkdirSync(OUTREACH_REQUESTS_DIR, { recursive: true });
+        const id = `outreach_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const request = {
+          id,
+          roleId: body.roleId,
+          company: body.company || 'Unknown',
+          title: body.title || 'Unknown',
+          messageType: body.messageType || 'linkedin_connect',
+          recipient: body.recipient || { name: '', title: '', relationship: 'none' },
+          jd: body.jd || '',
+          scoring: body.scoring || null,
+          score: body.score || 0,
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          result: null
+        };
+        fs.writeFileSync(path.join(OUTREACH_REQUESTS_DIR, `${id}.json`), JSON.stringify(request, null, 2));
+        sendJSON(res, 201, { id, status: 'pending', message: 'Outreach request queued' });
+      } catch (err) {
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    /* ── GET /api/role-outreach/:roleId — List outreach drafts for a role ── */
+    if (req.method === "GET" && pathname.startsWith("/api/role-outreach/")) {
+      const roleId = pathname.split("/api/role-outreach/")[1];
+      try {
+        fs.mkdirSync(OUTREACH_REQUESTS_DIR, { recursive: true });
+        const files = fs.readdirSync(OUTREACH_REQUESTS_DIR).filter(f => f.endsWith('.json'));
+        const roleOutreach = files.map(f => {
+          try { return JSON.parse(fs.readFileSync(path.join(OUTREACH_REQUESTS_DIR, f), 'utf8')); }
+          catch (e) { return null; }
+        }).filter(r => r && r.roleId === roleId).sort((a, b) => {
+          const tA = new Date(b.createdAt).getTime();
+          const tB = new Date(a.createdAt).getTime();
+          return tA - tB;
+        });
+        sendJSON(res, 200, { outreach: roleOutreach });
+      } catch (err) {
+        sendJSON(res, 500, { error: err.message });
       }
       return;
     }
@@ -1637,12 +2649,19 @@ Return JSON: { bullets: ["bullet 1", "bullet 2", ...] }`;
     }
 
     /* 404 for unhandled routes */
+    if (rootSpan) rootSpan.setAttribute('http.status_code', 404);
     sendJSON(res, 404, { error: "Not found", path: pathname });
 
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[Server] Error: ${message}`);
+    if (rootSpan) {
+      rootSpan.setStatus({ code: 2 /* ERROR */, message });
+      rootSpan.recordException(error);
+    }
     sendJSON(res, 500, { error: message });
+  } finally {
+    if (rootSpan) rootSpan.end();
   }
 });
 
@@ -1676,6 +2695,10 @@ function loadSeedDataIfEmpty() {
   }
   console.log('[Seed] Done. Seed data loaded into .pathfinder-data/');
 }
+
+/* ── Tracing ── */
+initTracing();
+const serverTracer = getTracer('server');
 
 /* ── Start ── */
 ensureAllDirs();
@@ -1729,6 +2752,7 @@ server.listen(PORT, () => {
 
     JD Fetch:
     POST   /api/fetch-jd                  — Fetch JD from URL
+    POST   /api/feed/process              — Run server-side feed pipeline (enrich → extract → score)
 
     Embeddings & Vector Store:
     POST   /api/embeddings                — Embed text or texts (returns 384-dim vectors)

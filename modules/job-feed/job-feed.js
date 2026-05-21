@@ -20,6 +20,7 @@ const FEED_CONFIG = {
   scoreBreakeven: 60,
   companyStages: ['Public', 'Late-stage private', 'Growth-stage', 'Early-stage', 'Bootstrapped / Private', 'Unknown'],
   searchDebounceMs: 150,
+  autoExpireDays: 14, // Auto-purge feed items older than this many days
 };
 
 let feedState = {
@@ -39,6 +40,8 @@ let feedState = {
   showAnalytics: false,
   expandedCards: new Set(),
   selectedJobId: null,
+  selectedIds: new Set(),
+  lastSelectedIndex: -1,
 };
 let expandedJDFullText = {};
 let searchDebounceTimer = null;
@@ -65,10 +68,28 @@ document.addEventListener('DOMContentLoaded', () => {
     renderFeed();
     renderAnalytics();
 
-    // Start JD enrichment after a delay to avoid competing with page load
+    // Run the unified feed pipeline (enrich → extract → score → persist)
+    // Delay slightly so the page renders first
     setTimeout(() => {
-      enrichMissingJDs();
-    }, 5000);
+      const fm = getFeedManager({
+        onProgress: (p) => showJDEnrichmentStatus(
+          p.stats.enrichSuccess + p.stats.enrichFailed,
+          p.stats.enrichTotal || 1
+        ),
+        onComplete: (stats) => {
+          dismissJDEnrichmentStatus();
+          if (stats.enrichSuccess > 0 || stats.salariesExtracted > 0 || stats.scored > 0) {
+            // Reload state and re-render with new data
+            loadFeedState();
+            applyFilters();
+            renderFeed();
+            renderAnalytics();
+            console.log(`[FeedManager] UI refreshed: ${stats.enrichSuccess} JDs, ${stats.salariesExtracted} salaries, ${stats.scored} scored`);
+          }
+        }
+      });
+      fm.processQueue();
+    }, 3000);
   } catch (err) {
     console.error('[Job Feed] Init failed:', err);
     const container = document.querySelector('main') || document.body;
@@ -116,6 +137,9 @@ function loadFeedState() {
 
   // Filter out any feed items that already exist in the pipeline
   filterApprovedFromFeed();
+
+  // Auto-expire stale feed items (older than autoExpireDays)
+  expireOldFeedItems();
 
   // Load saved sort preference
   feedState.sortBy = localStorage.getItem(FEED_CONFIG.storageKeySort) || 'bestMatch';
@@ -175,6 +199,216 @@ function filterApprovedFromFeed() {
   }
 }
 
+/**
+ * Auto-expire feed items older than FEED_CONFIG.autoExpireDays.
+ * Runs on every feed load to keep the queue fresh.
+ * Items that were approved or snoozed are unaffected (they live in
+ * the pipeline or snoozed list, not the feed queue).
+ */
+function expireOldFeedItems() {
+  const maxAgeDays = FEED_CONFIG.autoExpireDays || 14;
+  const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000);
+
+  const before = feedState.queue.length;
+  feedState.queue = feedState.queue.filter(item => {
+    const added = item.dateAdded ? new Date(item.dateAdded) : null;
+    // Keep items with no dateAdded (shouldn't happen, but be safe)
+    if (!added) return true;
+    return added >= cutoff;
+  });
+
+  const expired = before - feedState.queue.length;
+  if (expired > 0) {
+    saveFeedState();
+    console.log(`[Feed] Auto-expired ${expired} items older than ${maxAgeDays} days (${before} → ${feedState.queue.length})`);
+  }
+}
+
+/* ====== MANUAL REFRESH ====== */
+
+/**
+ * Refresh feed: force-pull latest data from the bridge (disk),
+ * reload state, re-score, re-render, and kick off JD enrichment.
+ * Bypasses timestamp comparison to always get the freshest disk data.
+ */
+async function refreshFeed() {
+  const btn = document.getElementById('btn-refresh-feed');
+  if (!btn || btn.classList.contains('refreshing')) return;
+
+  btn.classList.add('refreshing');
+  btn.textContent = '↻ Refreshing…';
+
+  const beforeCount = feedState.queue.length;
+
+  try {
+    // 1. Force-pull feed data from bridge, bypassing timestamp comparison
+    const pulled = await forcePullFromBridge();
+
+    // 2. Reload feed state from localStorage (picks up any new items)
+    loadFeedState();
+
+    // 3. Re-render everything
+    renderFeed();
+    renderAnalytics();
+    renderFeedHistory();
+
+    // 4. Run feed pipeline for any new items (enrich → extract → score)
+    const fm = getFeedManager();
+    fm.processQueue().then(() => {
+      loadFeedState();
+      applyFilters();
+      renderFeed();
+      renderAnalytics();
+    });
+
+    const newCount = feedState.queue.length;
+    const added = newCount - beforeCount;
+
+    // 5. Get last scan info for the toast
+    const lastScan = getLastScanInfo();
+    showRefreshToast(pulled, added, newCount, null, lastScan);
+  } catch (err) {
+    console.error('[Feed Refresh] Error:', err);
+    showRefreshToast(0, 0, feedState.queue.length, err.message);
+  } finally {
+    btn.classList.remove('refreshing');
+    btn.textContent = '↻ Refresh Feed';
+  }
+}
+
+/**
+ * Force-pull pf_feed_queue and pf_feed_runs from the bridge,
+ * ignoring timestamp comparison. This ensures the browser always
+ * gets the latest disk data (written by scheduled tasks).
+ * @returns {number} Number of keys updated
+ */
+async function forcePullFromBridge() {
+  const bridgeUrl = window.location.origin;
+  const keysToForce = ['pf_feed_queue', 'pf_feed_runs', 'pf_preferences', 'pf_feed_preferences'];
+  let updated = 0;
+
+  try {
+    const resp = await fetch(`${bridgeUrl}/data`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) {
+      console.warn('[Feed Refresh] Bridge returned', resp.status);
+      return 0;
+    }
+
+    const allData = await resp.json();
+    if (!allData.keys || typeof allData.keys !== 'object') return 0;
+
+    for (const key of keysToForce) {
+      const value = allData.keys[key];
+      if (!value || typeof value !== 'string') continue;
+
+      // Validate JSON before writing
+      try { JSON.parse(value); } catch { continue; }
+
+      const localValue = localStorage.getItem(key);
+      if (localValue !== value) {
+        localStorage.setItem(key, value);
+        updated++;
+        console.log(`[Feed Refresh] Pulled ${key} from bridge (${value.length} bytes)`);
+      }
+    }
+
+    // Update sync timestamps so the normal sync loop doesn't re-pull
+    const bridgeMeta = allData.meta || {};
+    try {
+      const ts = JSON.parse(localStorage.getItem('pf_sync_timestamps') || '{}');
+      for (const key of keysToForce) {
+        if (bridgeMeta[key] && bridgeMeta[key].updatedAt) {
+          ts[key] = bridgeMeta[key].updatedAt;
+        }
+      }
+      localStorage.setItem('pf_sync_timestamps', JSON.stringify(ts));
+    } catch { /* best effort */ }
+
+  } catch (err) {
+    console.error('[Feed Refresh] Bridge fetch failed:', err);
+  }
+
+  return updated;
+}
+
+/**
+ * Get info about the last email scan from pf_feed_runs.
+ * @returns {Object|null} { timestamp, added, source } or null
+ */
+function getLastScanInfo() {
+  try {
+    const runsRaw = localStorage.getItem('pf_feed_runs');
+    if (!runsRaw) return null;
+    const runs = JSON.parse(runsRaw);
+    if (!Array.isArray(runs) || runs.length === 0) return null;
+    const lastRun = runs[runs.length - 1];
+    return {
+      timestamp: lastRun.timestamp,
+      added: lastRun.added || lastRun.newJobsAdded || 0,
+      source: lastRun.source || 'unknown',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Format a relative time string (e.g. "2 hours ago", "just now")
+ */
+function formatRelativeTime(isoString) {
+  const now = Date.now();
+  const then = new Date(isoString).getTime();
+  const diffMs = now - then;
+  const diffMins = Math.floor(diffMs / 60000);
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const diffHrs = Math.floor(diffMins / 60);
+  if (diffHrs < 24) return `${diffHrs}h ago`;
+  const diffDays = Math.floor(diffHrs / 24);
+  return `${diffDays}d ago`;
+}
+
+/**
+ * Show a brief toast notification with refresh results.
+ */
+function showRefreshToast(pulledKeys, addedJobs, totalJobs, error, lastScan) {
+  // Remove any existing toast
+  const existing = document.querySelector('.refresh-toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'refresh-toast';
+
+  let message = '';
+  if (error) {
+    message = `⚠️ Refresh failed: ${error}`;
+  } else if (addedJobs > 0) {
+    message = `✅ <strong>${addedJobs} new job${addedJobs !== 1 ? 's' : ''}</strong> added (${totalJobs} total)`;
+  } else if (pulledKeys > 0) {
+    message = `✅ Feed synced from server — ${totalJobs} jobs`;
+  } else {
+    message = `✓ Feed is up to date — ${totalJobs} jobs`;
+  }
+
+  // Add last scan time
+  if (lastScan && lastScan.timestamp) {
+    message += `<br><span style="font-size:0.8rem;color:var(--text-tertiary);">Last email scan: ${formatRelativeTime(lastScan.timestamp)}</span>`;
+  }
+
+  toast.innerHTML = message;
+
+  document.body.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(12px)';
+    toast.style.transition = 'opacity 300ms, transform 300ms';
+    setTimeout(() => toast.remove(), 300);
+  }, 4500);
+}
+
 /* ====== AUTO-SCORING ====== */
 
 /**
@@ -202,31 +436,50 @@ function autoScoreFeedItems() {
   } catch (e) { /* ignore */ }
 
   feedState.queue.forEach(item => {
-    // Only rescore if: item has JD text AND (no score or no scoring breakdown)
-    if (item.jd && (!item.score || !item.scoring)) {
+    // Rescore if: no score, no scoring breakdown, or scoring version is outdated
+    const needsRescore = !item.score || !item.scoring || item.scoringVersion !== SCORING_VERSION;
+    if (needsRescore) {
       const result = scoreFeedItem(item, feedState.preferences);
       item.score = result.score;
       item.scoring = result.scoring;
       item.reasons = result.reasons;
+      item.scoringVersion = result.version;
       rescored++;
     }
 
-    // Apply dismissal penalty post-score (always, not just on rescore)
+    // NOTE: Salary extraction is handled by FeedManager._stageExtract()
+    // which runs AFTER JD enrichment completes. No timing bug.
+
+    // Apply dismissal penalty ONCE per score computation (not cumulatively).
+    // Calculate penalty based on dismissal patterns and subtract from the
+    // weighted score, but only during scoring — not as a separate pass.
     if (dismissalPatterns && item.score > 0) {
       let penalty = 0;
       const company = item.company || '';
       const domain = item.domain || '';
-      if (company && dismissalPatterns.byCompany[company]) {
+      if (company && dismissalPatterns.byCompany && dismissalPatterns.byCompany[company]) {
         const cnt = dismissalPatterns.byCompany[company].count;
         if (cnt >= 3) penalty += 15;
         else if (cnt >= 2) penalty += 5;
       }
-      if (domain && dismissalPatterns.byDomain[domain]) {
+      if (domain && dismissalPatterns.byDomain && dismissalPatterns.byDomain[domain]) {
         const cnt = dismissalPatterns.byDomain[domain].count;
         if (cnt >= 2) penalty += 5;
       }
       if (penalty > 0) {
-        item.score = Math.max(0, (item.score || 0) - penalty);
+        // Recalculate base score from scoring dimensions to avoid cumulative drift
+        const s = item.scoring || {};
+        const w = typeof SCORE_WEIGHTS !== 'undefined' ? SCORE_WEIGHTS : {
+          titleFit: 0.15, networkFit: 0.12, domainFit: 0.18, levelFit: 0.10,
+          companyFit: 0.08, compensationFit: 0.12, locationFit: 0.15, jdFit: 0.10
+        };
+        const baseScore = Math.round(
+          (s.titleFit || 0) * w.titleFit + (s.networkFit || 0) * w.networkFit +
+          (s.domainFit || 0) * w.domainFit + (s.levelFit || 0) * w.levelFit +
+          (s.companyFit || 0) * w.companyFit + (s.compensationFit || 0) * w.compensationFit +
+          (s.locationFit || 0) * w.locationFit + (s.jdFit || 0) * w.jdFit
+        );
+        item.score = Math.max(0, baseScore - penalty);
       }
     }
   });
@@ -235,6 +488,58 @@ function autoScoreFeedItems() {
   if (rescored > 0) {
     saveFeedState();
   }
+}
+
+/**
+ * Clean LinkedIn page text by stripping navigation chrome, login prompts,
+ * and related job listings — keeping only the actual JD content.
+ * @param {string} rawText - Full text extracted from LinkedIn page
+ * @returns {string} Cleaned JD text
+ */
+function cleanLinkedInJD(rawText) {
+  if (!rawText) return rawText;
+
+  const lines = rawText.split('\n');
+  const boilerplate = [
+    /linkedin/i, /skip to main/i, /sign in/i, /join now/i, /join to apply/i,
+    /user agreement/i, /privacy policy/i, /cookie policy/i, /expand search/i,
+    /clear text/i, /ai-powered advice/i, /evaluate your skills/i,
+    /currently selected search/i, /forgot password/i, /search options/i,
+  ];
+
+  // Find start: first line > 80 chars that isn't boilerplate
+  let startIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.length < 80) continue;
+    if (boilerplate.some(p => p.test(line))) continue;
+    startIdx = i;
+    break;
+  }
+  if (startIdx < 0) return rawText;
+
+  // Find end: "Referrals increase", "Get notified", "Similar jobs", etc.
+  const endPatterns = [
+    /referrals increase/i, /get notified about new/i, /similar jobs/i,
+    /people also viewed/i, /show more jobs/i, /set alert/i,
+  ];
+  let endIdx = lines.length;
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    if (endPatterns.some(p => p.test(lines[i].trim()))) {
+      endIdx = i;
+      break;
+    }
+  }
+
+  const cleaned = lines.slice(startIdx, endIdx).filter(l => {
+    const t = l.trim();
+    if (!t) return false;
+    if (boilerplate.some(p => p.test(t))) return false;
+    if (/^(•|Apply|Save|Show|or|Email|Password|Report this job)$/i.test(t)) return false;
+    return true;
+  }).join('\n').trim();
+
+  return cleaned.length > 50 ? cleaned : rawText;
 }
 
 /**
@@ -268,39 +573,21 @@ async function enrichMissingJDs() {
     if (!item.url || failedUrls.has(item.url)) return false;
     if (item.jd && item.jd.trim()) return false; // Already has JD
 
-    // Filter to only standard job board URLs (exclude LinkedIn due to server-side fetch blocking)
-    const url = item.url.toLowerCase();
-    const isLinkedIn = url.includes('linkedin.com');
-    if (isLinkedIn) return false; // Skip LinkedIn - blocks server-side fetching
-
-    const isValidJobUrl = url.includes('indeed.com') ||
-                         url.includes('glassdoor.com') ||
-                         url.includes('builtin.com') ||
-                         url.includes('techcrunch.com') ||
-                         url.includes('ycombinator.com') ||
-                         url.includes('hired.com') ||
-                         url.includes('angel.co') ||
-                         url.includes('crunchbase.com') ||
-                         url.includes('producthunt.com');
-
-    return isValidJobUrl;
+    // Valid URL exists — try all domains including LinkedIn
+    // (LinkedIn public job pages may return content; failures are
+    // handled gracefully via the failedUrls set)
+    return !!item.url;
   });
-
-  // Log LinkedIn items that were skipped
-  const linkedInItems = feedState.queue.filter(item => item.url && item.url.toLowerCase().includes('linkedin.com') && (!item.jd || !item.jd.trim()));
-  if (linkedInItems.length > 0) {
-    console.log(`[JD Enrichment] Skipped ${linkedInItems.length} LinkedIn URLs (server-side fetch not supported)`);
-  }
 
   if (itemsToEnrich.length === 0) {
     console.log('[JD Enrichment] No items to enrich');
     return;
   }
 
-  console.log(`[JD Enrichment] Starting enrichment for ${itemsToEnrich.length} items (max 20)`);
+  console.log(`[JD Enrichment] Starting enrichment for ${itemsToEnrich.length} items (max 50)`);
 
-  // Limit to 20 per run
-  const itemsToProcess = itemsToEnrich.slice(0, 20);
+  // Limit to 50 per run
+  const itemsToProcess = itemsToEnrich.slice(0, 50);
   const batchSize = 3;
   const delayMs = 2000;
 
@@ -329,9 +616,21 @@ async function enrichMissingJDs() {
     results.forEach((result, idx) => {
       if (result) {
         const item = batch[idx];
-        item.jd = result.text;
+        // Clean LinkedIn noise from fetched text (nav chrome, login prompts, etc.)
+        item.jd = item.url && item.url.includes('linkedin.com')
+          ? cleanLinkedInJD(result.text)
+          : result.text;
         item.jdFetchedAt = result.fetchedAt;
-        item.jdCharCount = result.charCount;
+        item.jdCharCount = item.jd.length;
+
+        // Extract salary from JD if compensation is missing
+        if ((!item.compensation || !item.compensation.raw) && typeof processJD === 'function') {
+          const jdData = processJD(item.jd);
+          if (jdData.salary) {
+            item.compensation = { raw: jdData.salary };
+            console.log(`[JD Enrichment] Extracted salary for ${item.company}: ${jdData.salary}`);
+          }
+        }
 
         // Rescore with new JD
         if (feedState.preferences) {
@@ -339,6 +638,7 @@ async function enrichMissingJDs() {
           item.score = scoreResult.score;
           item.scoring = scoreResult.scoring;
           item.reasons = scoreResult.reasons;
+          item.scoringVersion = scoreResult.version;
         }
 
         successCount++;
@@ -638,6 +938,43 @@ function extractDomain(url) {
 
 function setupEventListeners() {
   // Main buttons
+  const btnRefresh = document.getElementById('btn-refresh-feed');
+  if (btnRefresh) btnRefresh.addEventListener('click', refreshFeed);
+
+  // Re-process feed pipeline (enrich → extract → score → persist)
+  const btnReprocess = document.getElementById('btn-reprocess-feed');
+  if (btnReprocess) btnReprocess.addEventListener('click', () => {
+    if (typeof getFeedManager !== 'function') {
+      showToast('FeedManager not loaded', 'error');
+      return;
+    }
+    const fm = getFeedManager({
+      onProgress: (p) => showJDEnrichmentStatus(
+        p.stats.enrichSuccess + p.stats.enrichFailed,
+        p.stats.enrichTotal || 1
+      ),
+      onComplete: (stats) => {
+        dismissJDEnrichmentStatus();
+        const parts = [];
+        if (stats.enrichSuccess > 0) parts.push(`${stats.enrichSuccess} JDs fetched`);
+        if (stats.salariesExtracted > 0) parts.push(`${stats.salariesExtracted} salaries found`);
+        if (stats.scored > 0) parts.push(`${stats.scored} items scored`);
+        showToast(parts.length > 0 ? parts.join(', ') : 'Pipeline complete — no changes needed', 'success');
+        loadFeedState();
+        applyFilters();
+        renderFeed();
+        renderAnalytics();
+      },
+      onError: (err) => console.warn('[Re-process] Error:', err)
+    });
+    if (fm.isRunning) {
+      showToast('Pipeline already running', 'info');
+      return;
+    }
+    showToast('Re-processing feed...', 'info');
+    fm.processQueue({ forceRescore: true, forceExtract: true });
+  });
+
   const btnPrefs = document.getElementById('btn-preferences');
   if (btnPrefs) btnPrefs.addEventListener('click', togglePreferencesPanel);
 
@@ -676,6 +1013,9 @@ function setupEventListeners() {
 
   // Sort and search controls
   setupSortAndSearch();
+
+  // Bulk action toolbar
+  setupBulkActionListeners();
 }
 
 /* ====== SORT & SEARCH ====== */
@@ -820,12 +1160,12 @@ function renderFeedHistory() {
       return;
     }
 
-    // Show last 10 runs
-    const recentRuns = runs.slice(0, 10);
+    // Show last 10 runs, newest first
+    const recentRuns = runs.slice(-10).reverse();
 
     let html = `
-      <div class="feed-history-section" style="margin: 1rem 0; padding: 1rem; background: #f8f9fa; border-radius: 6px; border-left: 4px solid #0066cc;">
-        <div class="feed-history-toggle" style="cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-weight: 500; color: #333; padding: 0.5rem 0;">
+      <div class="feed-history-section" style="margin: 1rem 0; padding: 1rem; background: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--bg-subtle); border-left: 4px solid var(--accent);">
+        <div class="feed-history-toggle" style="cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-weight: 500; color: var(--text-primary); padding: 0.5rem 0;">
           <span>📋 Feed Run History</span>
           <span class="history-arrow" style="display: inline-block;">▼</span>
         </div>
@@ -836,15 +1176,23 @@ function renderFeedHistory() {
     recentRuns.forEach((run, idx) => {
       const timestamp = new Date(run.timestamp).toLocaleString();
       const source = escapeHtml(run.source || 'Unknown');
-      const found = run.itemsFound || 0;
-      const added = run.itemsAdded || 0;
-      const deduped = run.itemsDeduped || 0;
+      // Handle varying field names across run formats
+      const parsed = run.jobsParsed || run.itemsFound || 0;
+      const added = run.added || run.newJobsAdded || run.itemsAdded || 0;
+      const skipped = run.skipped || run.duplicatesSkipped || run.itemsDeduped || 0;
+      const queueSize = run.totalQueueSize || run.queueSizeAfter || '';
+      const notes = run.notes || '';
 
       html += `
-        <div style="padding: 0.75rem 0; border-bottom: 1px solid #ddd; font-size: 0.9rem;">
-          <div style="margin-bottom: 0.25rem;"><strong>${timestamp}</strong></div>
-          <div style="color: #666;">Source: ${source}</div>
-          <div style="color: #666;">Found: ${found} | Added: ${added} | Deduped: ${deduped}</div>
+        <div style="padding: 0.75rem 0; border-bottom: 1px solid var(--bg-subtle); font-size: 0.875rem;">
+          <div style="margin-bottom: 0.25rem; display: flex; justify-content: space-between; align-items: baseline;">
+            <strong style="color: var(--text-primary);">${timestamp}</strong>
+            <span style="font-size: 0.75rem; color: var(--text-tertiary);">${source}</span>
+          </div>
+          <div style="color: var(--text-secondary);">
+            Parsed: ${parsed} ∙ Added: <strong style="color: ${added > 0 ? 'var(--success)' : 'var(--text-tertiary)'}">${added}</strong> ∙ Skipped: ${skipped}${queueSize ? ` ∙ Queue: ${queueSize}` : ''}
+          </div>
+          ${notes ? `<div style="color: var(--text-tertiary); font-size: 0.8rem; margin-top: 0.25rem;">${escapeHtml(notes.substring(0, 120))}${notes.length > 120 ? '…' : ''}</div>` : ''}
         </div>
       `;
     });
@@ -932,15 +1280,69 @@ function showFeedStats() {
     statFiltered.closest('.feed-stat').style.display = 'none';
   }
 
+  // Show last email scan time
+  const lastScan = getLastScanInfo();
+  const scanContainer = document.getElementById('stat-last-scan-container');
+  const scanValue = document.getElementById('stat-last-scan');
+  if (lastScan && lastScan.timestamp && scanContainer && scanValue) {
+    scanValue.textContent = formatRelativeTime(lastScan.timestamp);
+    scanContainer.style.display = 'flex';
+  }
+
   if (container) container.style.display = 'flex';
 }
 
 /**
  * Render a single feed card (compact version, no expand)
  */
+/**
+ * Render match/gap pills for a feed card.
+ * Green pills = positive domain matches (AdTech, AI/ML, etc.)
+ * Orange/red pills = dealbreaker flags (Healthcare, Gaming, etc.)
+ */
+function renderMatchPills(job) {
+  const pills = [];
+
+  // Positive matches from classification.industries
+  if (job.classification && job.classification.industries) {
+    for (const industry of job.classification.industries) {
+      // Short labels for common industries
+      const label = {
+        'AdTech': 'AdTech',
+        'FinTech': 'FinServ',
+        'Internal/SalesOps': 'Internal Tools',
+        'AI/ML Platform': 'AI/ML',
+        'Data Platform': 'Data'
+      }[industry] || industry;
+
+      pills.push(`<span class="match-pill match-pill--positive" title="Preferred industry match: ${escapeHtml(industry)}">${escapeHtml(label)}</span>`);
+    }
+  }
+
+  // Dealbreaker flags from jdDetails.dealbreakers
+  if (job.jdDetails && job.jdDetails.dealbreakers && job.jdDetails.dealbreakers.length > 0) {
+    for (const db of job.jdDetails.dealbreakers) {
+      // Short labels
+      const label = db.label
+        .replace(' domain experience', '')
+        .replace(' experience', '')
+        .replace('Dedicated ', '')
+        .replace('Hands-on ', '')
+        .replace(' (as primary role)', '')
+        .replace(' / Manufacturing', '');
+      pills.push(`<span class="match-pill match-pill--dealbreaker" title="Dealbreaker: ${escapeHtml(db.label)} (${db.source}, -${db.penalty}pts)">⚠ ${escapeHtml(label)}</span>`);
+    }
+  }
+
+  if (pills.length === 0) return '';
+
+  return `<div class="match-pills" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px;">${pills.join('')}</div>`;
+}
+
 function renderFeedCard(job) {
   const isDismissed = feedState.dismissed.has(job.id);
   const isSelected = feedState.selectedJobId === job.id;
+  const isMultiSelected = feedState.selectedIds.has(job.id);
   const scoreClass = getScoreBadgeClass(job.score || 0);
   const stage = job.companyStage || 'Unknown';
   const rawComp = job.compensation || job.salary;
@@ -957,7 +1359,8 @@ function renderFeedCard(job) {
   }
 
   return `
-    <div id="${htmlId}" class="feed-card ${isDismissed ? 'feed-card--dismissed' : ''} ${isSelected ? 'feed-card--selected' : ''}" data-job-id="${job.id}">
+    <div id="${htmlId}" class="feed-card ${isDismissed ? 'feed-card--dismissed' : ''} ${isSelected || isMultiSelected ? 'feed-card--selected' : ''}" data-job-id="${job.id}">
+      <input type="checkbox" class="feed-checkbox" data-job-id="${job.id}" ${isMultiSelected ? 'checked' : ''} aria-label="Select this job">
       <div class="score-badge ${scoreClass}" data-job-id="${job.id}" role="button" tabindex="0" aria-label="Show score breakdown">
         <div class="score-badge__score" data-score-value="${job.score || 0}">0</div>
         <div class="score-badge__label">Score</div>
@@ -967,7 +1370,7 @@ function renderFeedCard(job) {
         <div class="feed-header-row">
           ${logoHtml}
           <div style="flex: 1;">
-            <h3 class="feed-title">${escapeHtml(job.title)}</h3>
+            <h3 class="feed-title">${escapeHtml(job.title)}${job.url ? ` <a href="${escapeHtml(job.url)}" target="_blank" rel="noopener" class="feed-jd-link" onclick="event.stopPropagation()" title="View original posting">↗</a>` : ''}</h3>
             <span class="feed-company">${escapeHtml(job.company)}${(() => {
               const net = getNetworkCountForCompany(job.company);
               if (net.total > 0) {
@@ -1001,6 +1404,7 @@ function renderFeedCard(job) {
           <span class="badge badge--stage">${escapeHtml(stage)}</span>
           <span class="badge badge--source">${escapeHtml(source)}</span>
         </div>
+        ${renderMatchPills(job)}
 
         <div id="breakdown-${job.id}" class="score-breakdown"></div>
       </div>
@@ -1009,6 +1413,7 @@ function renderFeedCard(job) {
         <button class="btn-small btn-approve" data-job-id="${job.id}" data-action="approve" aria-label="Approve and add to pipeline">✓</button>
         <button class="btn-small btn-snooze" data-job-id="${job.id}" data-action="snooze" aria-label="Snooze this job for 3 days">⏰</button>
         <button class="btn-small btn-dismiss" data-job-id="${job.id}" data-action="dismiss" aria-label="Dismiss this job">✕</button>
+        <button class="btn-small btn-block" data-job-id="${job.id}" data-action="block" data-company="${escapeHtml(job.company || '')}" aria-label="Block all jobs from ${escapeHtml(job.company || 'this company')}" title="Block ${escapeHtml(job.company || 'company')}">🚫</button>
       </div>
     </div>
   `;
@@ -1079,6 +1484,203 @@ function attachFeedCardListeners() {
       dismissJob(btn.dataset.jobId);
     });
   });
+
+  document.querySelectorAll('[data-action="block"]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      blockCompany(btn.dataset.company);
+    });
+  });
+
+  // Attach checkbox listeners
+  attachCheckboxListeners();
+}
+
+/* ====== BULK ACTIONS ====== */
+
+/**
+ * Setup bulk action toolbar event listeners
+ */
+function setupBulkActionListeners() {
+  const bulkApproveBtn = document.getElementById('bulk-approve-btn');
+  if (bulkApproveBtn) {
+    bulkApproveBtn.addEventListener('click', bulkApprove);
+  }
+
+  const bulkDismissBtn = document.getElementById('bulk-dismiss-btn');
+  if (bulkDismissBtn) {
+    bulkDismissBtn.addEventListener('click', bulkDismiss);
+  }
+
+  const bulkDeselectBtn = document.getElementById('bulk-deselect-btn');
+  if (bulkDeselectBtn) {
+    bulkDeselectBtn.addEventListener('click', deselectAll);
+  }
+
+  const bulkSelectAll = document.getElementById('bulk-select-all');
+  if (bulkSelectAll) {
+    bulkSelectAll.addEventListener('change', (e) => {
+      if (e.target.checked) {
+        selectAllVisible();
+      } else {
+        deselectAll();
+      }
+    });
+  }
+}
+
+/**
+ * Attach checkbox listeners to feed cards
+ */
+function attachCheckboxListeners() {
+  document.querySelectorAll('.feed-checkbox').forEach((checkbox, index) => {
+    checkbox.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const jobId = checkbox.dataset.jobId;
+
+      if (e.shiftKey && feedState.lastSelectedIndex >= 0) {
+        // Shift-click: select range
+        const currentIndex = index;
+        const start = Math.min(feedState.lastSelectedIndex, currentIndex);
+        const end = Math.max(feedState.lastSelectedIndex, currentIndex);
+
+        document.querySelectorAll('.feed-checkbox').forEach((cb, i) => {
+          if (i >= start && i <= end) {
+            cb.checked = true;
+            feedState.selectedIds.add(cb.dataset.jobId);
+          }
+        });
+        feedState.lastSelectedIndex = currentIndex;
+      } else {
+        // Regular click: toggle single job
+        if (checkbox.checked) {
+          feedState.selectedIds.add(jobId);
+        } else {
+          feedState.selectedIds.delete(jobId);
+        }
+        feedState.lastSelectedIndex = index;
+      }
+
+      updateBulkToolbar();
+      renderFeed();
+    });
+  });
+}
+
+/**
+ * Toggle selection of a single job
+ */
+function toggleSelectJob(jobId) {
+  if (feedState.selectedIds.has(jobId)) {
+    feedState.selectedIds.delete(jobId);
+  } else {
+    feedState.selectedIds.add(jobId);
+  }
+  updateBulkToolbar();
+  renderFeed();
+}
+
+/**
+ * Select all visible jobs in filteredQueue
+ */
+function selectAllVisible() {
+  feedState.filteredQueue.forEach(job => {
+    feedState.selectedIds.add(job.id);
+  });
+  updateBulkToolbar();
+  renderFeed();
+}
+
+/**
+ * Deselect all jobs
+ */
+function deselectAll() {
+  feedState.selectedIds.clear();
+  feedState.lastSelectedIndex = -1;
+  updateBulkToolbar();
+  renderFeed();
+}
+
+/**
+ * Update bulk toolbar visibility and state
+ */
+function updateBulkToolbar() {
+  const toolbar = document.getElementById('bulk-toolbar');
+  const selectAllCheckbox = document.getElementById('bulk-select-all');
+  const countSpan = document.getElementById('bulk-count');
+
+  if (!toolbar) return;
+
+  const count = feedState.selectedIds.size;
+
+  if (count > 0) {
+    toolbar.style.display = 'flex';
+    countSpan.textContent = `${count} selected`;
+
+    // Update select-all checkbox state
+    if (selectAllCheckbox) {
+      const allVisible = feedState.filteredQueue.length;
+      selectAllCheckbox.checked = count === allVisible && allVisible > 0;
+      selectAllCheckbox.indeterminate = count > 0 && count < allVisible;
+    }
+  } else {
+    toolbar.style.display = 'none';
+    if (selectAllCheckbox) {
+      selectAllCheckbox.checked = false;
+      selectAllCheckbox.indeterminate = false;
+    }
+  }
+}
+
+/**
+ * Approve all selected jobs
+ */
+function bulkApprove() {
+  if (feedState.selectedIds.size === 0) {
+    showToast('No jobs selected', 'info');
+    return;
+  }
+
+  const selectedJobIds = Array.from(feedState.selectedIds);
+  const approvedCount = selectedJobIds.length;
+
+  selectedJobIds.forEach(jobId => {
+    const job = feedState.queue.find(j => j.id === jobId);
+    if (job) {
+      addJobToPipeline(job);
+    }
+  });
+
+  deselectAll();
+  showToast(`Added ${approvedCount} job${approvedCount !== 1 ? 's' : ''} to pipeline`, 'success');
+}
+
+/**
+ * Dismiss all selected jobs
+ */
+function bulkDismiss() {
+  if (feedState.selectedIds.size === 0) {
+    showToast('No jobs selected', 'info');
+    return;
+  }
+
+  const selectedJobIds = Array.from(feedState.selectedIds);
+  const dismissedCount = selectedJobIds.length;
+
+  selectedJobIds.forEach(jobId => {
+    const item = feedState.queue.find(j => j.id === jobId);
+    if (item) {
+      recordDismissal(item, 'manual');
+    }
+    feedState.dismissed.add(jobId);
+  });
+
+  saveFeedState();
+  deselectAll();
+  applyFilters();
+  renderFeed();
+  renderAnalytics();
+  showToast(`Dismissed ${dismissedCount} job${dismissedCount !== 1 ? 's' : ''}`, 'info');
 }
 
 /* ====== FEED ACTIONS ====== */
@@ -1100,7 +1702,7 @@ function toggleScoreBreakdown(jobId) {
 
   // Use real scoring object (scoring > scoreBreakdown fallback)
   const scoring = job.scoring || job.scoreBreakdown || {};
-  const dims = ['titleFit', 'networkFit', 'domainFit', 'levelFit', 'companyFit', 'compensationFit', 'locationFit'];
+  const dims = ['titleFit', 'networkFit', 'domainFit', 'levelFit', 'companyFit', 'compensationFit', 'locationFit', 'jdFit'];
   const dimLabels = {
     titleFit: 'Title Fit',
     networkFit: 'Network Fit',
@@ -1108,7 +1710,8 @@ function toggleScoreBreakdown(jobId) {
     levelFit: 'Level Fit',
     companyFit: 'Company Fit',
     compensationFit: 'Comp Fit',
-    locationFit: 'Location Fit'
+    locationFit: 'Location Fit',
+    jdFit: 'JD Fit'
   };
 
   let breakdown = '';
@@ -1209,6 +1812,95 @@ function closeDetailPanel() {
   document.querySelectorAll('.feed-card--selected').forEach(c => c.classList.remove('feed-card--selected'));
 }
 
+/* ====== JD FORMATTING ====== */
+
+/**
+ * Format raw JD text for readable HTML display.
+ * Escapes HTML first (preventing injection), then converts structure:
+ * double newlines → paragraphs, bullet chars → <ul>/<li>, single newlines → <br>
+ * @param {string} jdText - Raw job description text
+ * @returns {string} Formatted HTML string safe for innerHTML
+ */
+function formatJDForDisplay(jdText) {
+  if (!jdText) return '';
+
+  // Pre-clean: strip lone bullet characters and excessive whitespace
+  let cleaned = jdText
+    .replace(/^\s*[•\-\*]\s*$/gm, '')       // Remove lines that are only a bullet char
+    .replace(/\n{3,}/g, '\n\n')              // Collapse 3+ newlines to 2
+    .trim();
+
+  // First, escape HTML entities to prevent injection
+  let escaped = escapeHtml(cleaned);
+
+  // Split by double newlines for paragraphs
+  const paragraphs = escaped.split(/\n\n+/);
+
+  // Process each paragraph
+  const formatted = paragraphs.map(para => {
+    const trimmed = para.trim();
+    if (!trimmed) return '';
+
+    // Check if this paragraph contains bullet points
+    const lines = trimmed.split('\n');
+    const hasBullets = lines.some(line => {
+      const clean = line.trim();
+      return /^[•\-\*]\s/.test(clean);
+    });
+
+    if (hasBullets) {
+      // Separate header lines from bullet lines
+      const headerLines = [];
+      const bulletLines = [];
+      lines.forEach(line => {
+        const clean = line.trim();
+        if (!clean) return;
+        if (/^[•\-\*]\s/.test(clean)) {
+          bulletLines.push(clean.replace(/^[•\-\*]\s+/, '').trim());
+        } else {
+          // Non-bullet line before bullets acts as a header
+          if (bulletLines.length === 0) {
+            headerLines.push(clean);
+          } else {
+            bulletLines.push(clean);
+          }
+        }
+      });
+
+      let html = '';
+      if (headerLines.length > 0) {
+        html += `<div style="margin: 0.5rem 0 0.25rem 0; font-weight: 600;">${headerLines.join('<br>')}</div>`;
+      }
+      const listItems = bulletLines
+        .filter(item => item.length > 0)
+        .map(item => `<li>${item}</li>`)
+        .join('');
+      if (listItems) {
+        html += `<ul style="margin: 0.25rem 0 0.5rem 0; padding-left: 1.5rem;">${listItems}</ul>`;
+      }
+      return html;
+    }
+
+    // Check if line looks like a section header (short, no period, often title case)
+    if (lines.length === 1 && trimmed.length < 60 && !trimmed.includes('.') && /^[A-Z]/.test(trimmed)) {
+      return `<div style="margin: 0.75rem 0 0.25rem 0; font-weight: 600;">${trimmed}</div>`;
+    }
+
+    // Regular paragraph with proper line breaks
+    const withBreaks = lines
+      .map(line => {
+        const clean = line.trim();
+        return clean ? `<div>${clean}</div>` : '';
+      })
+      .filter(item => item)
+      .join('');
+
+    return withBreaks ? `<div style="margin: 0.5rem 0;">${withBreaks}</div>` : '';
+  }).filter(p => p).join('');
+
+  return formatted || escapeHtml(cleaned);
+}
+
 /**
  * Render detail panel with job information
  */
@@ -1225,13 +1917,14 @@ function renderDetailPanel(job) {
   let breakdownHtml = '';
   if (job.scoring) {
     const dims = [
-      { key: 'titleFit', label: 'Title Fit', weight: '20%' },
-      { key: 'networkFit', label: 'Network Fit', weight: '20%' },
-      { key: 'domainFit', label: 'Domain Fit', weight: '15%' },
-      { key: 'levelFit', label: 'Level Fit', weight: '12%' },
-      { key: 'companyFit', label: 'Company Fit', weight: '12%' },
+      { key: 'domainFit', label: 'Domain Fit', weight: '18%' },
+      { key: 'titleFit', label: 'Title Fit', weight: '15%' },
+      { key: 'locationFit', label: 'Location Fit', weight: '15%' },
+      { key: 'networkFit', label: 'Network Fit', weight: '12%' },
       { key: 'compensationFit', label: 'Comp Fit', weight: '12%' },
-      { key: 'locationFit', label: 'Location Fit', weight: '9%' },
+      { key: 'jdFit', label: 'JD Fit', weight: '10%' },
+      { key: 'levelFit', label: 'Level Fit', weight: '10%' },
+      { key: 'companyFit', label: 'Company Fit', weight: '8%' },
     ];
     breakdownHtml = dims.map(d => {
       const val = job.scoring[d.key] || 0;
@@ -1293,18 +1986,18 @@ function renderDetailPanel(job) {
     <div class="detail-section">
       <div class="detail-section-title">Job Description</div>
       ${job.url ? `<div style="text-align: right; margin-bottom: 8px;"><a href="${escapeHtml(job.url)}" target="_blank" rel="noopener" style="color: var(--accent); font-size: 0.85rem; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">View Original Posting ↗</a></div>` : ''}
-      <div class="jd-content" id="jd-content-${job.id}" style="max-height: none; overflow: visible;">
+      <div class="jd-content" id="jd-content-${job.id}" style="max-height: none; overflow: visible; font-size: 0.9rem; line-height: 1.5;">
         ${job.jd ? (() => {
-          const jdText = escapeHtml(job.jd);
+          const formattedJd = formatJDForDisplay(job.jd);
           const isLong = job.jd.length > 500;
           if (isLong) {
             return `<div style="max-height: 300px; overflow: hidden; position: relative;" id="jd-collapsed-${job.id}">
-              ${jdText}
+              ${formattedJd}
               <div style="position: absolute; bottom: 0; left: 0; right: 0; height: 60px; background: linear-gradient(transparent, var(--bg-secondary)); pointer-events: none;"></div>
             </div>
             <button class="btn-small" onclick="toggleJD('${job.id}');" style="margin-top: 8px; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 0.85rem; padding: 4px 0;">Show full JD ▼</button>`;
           } else {
-            return jdText;
+            return formattedJd;
           }
         })() : 'No JD available'}
       </div>
@@ -1320,11 +2013,19 @@ function renderDetailPanel(job) {
     </div>
 
     <div class="detail-actions">
-      <button class="btn-small btn-approve" onclick="approveJob('${job.id}');" style="flex: 1;">✓ Approve</button>
-      <button class="btn-small btn-snooze" onclick="snoozeJob('${job.id}');" style="flex: 0;">⏰</button>
-      <button class="btn-small btn-dismiss" onclick="dismissJob('${job.id}');" style="flex: 0;">✕</button>
+      <button class="btn-small btn-approve" data-detail-action="approve" data-job-id="${job.id}" style="flex: 1;">✓ Approve</button>
+      <button class="btn-small btn-snooze" data-detail-action="snooze" data-job-id="${job.id}" style="flex: 0;">⏰</button>
+      <button class="btn-small btn-dismiss" data-detail-action="dismiss" data-job-id="${job.id}" style="flex: 0;">✕</button>
+      <button class="btn-small btn-block" data-detail-action="block" data-job-id="${job.id}" style="flex: 0;" title="Block all jobs from ${escapeHtml(job.company || 'this company')}">🚫 Block</button>
     </div>
   `;
+
+  // Bind detail panel action buttons via event listeners (not inline onclick)
+  // to avoid HTML-encoding issues with special characters in job IDs
+  panel.querySelector('[data-detail-action="approve"]')?.addEventListener('click', () => approveJob(job.id));
+  panel.querySelector('[data-detail-action="snooze"]')?.addEventListener('click', () => snoozeJob(job.id));
+  panel.querySelector('[data-detail-action="dismiss"]')?.addEventListener('click', () => dismissJob(job.id));
+  panel.querySelector('[data-detail-action="block"]')?.addEventListener('click', () => blockCompany(job.company));
 }
 
 /**
@@ -1438,14 +2139,19 @@ function addJobToPipeline(job) {
 
   // Parse compensation data using comp-utils (if available)
   if (typeof parseSalaryAndEstimate === 'function') {
-    const compEstimate = parseSalaryAndEstimate(
-      job.compensation || job.salary,
-      job.companyStage || 'Unknown',
-      job.title,
-      job.jd || ''
-    );
-    if (compEstimate) {
-      pipelineItem.compEstimate = compEstimate;
+    // Normalize compensation to a string — it may be a string, object with .raw, or empty object
+    const rawComp = job.compensation || job.salary;
+    const compStr = typeof rawComp === 'string' ? rawComp : (rawComp && rawComp.raw ? rawComp.raw : '');
+    if (compStr) {
+      const compEstimate = parseSalaryAndEstimate(
+        compStr,
+        job.companyStage || 'Unknown',
+        job.title,
+        job.jd || ''
+      );
+      if (compEstimate) {
+        pipelineItem.compEstimate = compEstimate;
+      }
     }
   }
 
@@ -1528,6 +2234,97 @@ function dismissJob(jobId) {
   showToast('Job dismissed', 'info');
 }
 
+/* ====== BLOCKED COMPANIES ====== */
+
+/**
+ * Check if a company is on the blocklist (fuzzy match)
+ * @param {string} company - Company name to check
+ * @returns {boolean}
+ */
+function isCompanyBlocked(company) {
+  if (!company) return false;
+  const blockedCompanies = feedState.preferences.blockedCompanies || [];
+  if (blockedCompanies.length === 0) return false;
+
+  const norm = company.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return blockedCompanies.some(bc => {
+    const bcNorm = (typeof bc === 'string' ? bc : bc.company || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    return bcNorm === norm || bcNorm.includes(norm) || norm.includes(bcNorm);
+  });
+}
+
+/**
+ * Block a company — adds to blocklist, auto-dismisses all their items, re-renders feed
+ * @param {string} company - Company name to block
+ */
+function blockCompany(company) {
+  if (!company) return;
+
+  // Initialize blocklist if needed
+  if (!feedState.preferences.blockedCompanies) {
+    feedState.preferences.blockedCompanies = [];
+  }
+
+  // Check if already blocked (fuzzy)
+  if (isCompanyBlocked(company)) {
+    showToast(`${company} is already blocked`, 'info');
+    return;
+  }
+
+  // Add to blocklist with timestamp
+  feedState.preferences.blockedCompanies.push({
+    company: company,
+    blockedAt: new Date().toISOString()
+  });
+
+  // Auto-dismiss all items from this company
+  const companyNorm = company.toLowerCase().replace(/[^a-z0-9]/g, '');
+  let autoDismissed = 0;
+  feedState.queue.forEach(item => {
+    if (!item.company) return;
+    const itemNorm = item.company.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (itemNorm === companyNorm || itemNorm.includes(companyNorm) || companyNorm.includes(itemNorm)) {
+      if (!feedState.dismissed.has(item.id)) {
+        feedState.dismissed.add(item.id);
+        autoDismissed++;
+      }
+    }
+  });
+
+  saveFeedState();
+  closeDetailPanel();
+  applyFilters();
+  renderFeed();
+  renderAnalytics();
+
+  const countMsg = autoDismissed > 0 ? ` (${autoDismissed} item${autoDismissed > 1 ? 's' : ''} removed)` : '';
+  showToast(`Blocked ${company}${countMsg}`, 'info');
+}
+
+/**
+ * Unblock a company — removes from blocklist, re-renders feed
+ * @param {string} company - Company name to unblock
+ */
+function unblockCompany(company) {
+  if (!company || !feedState.preferences.blockedCompanies) return;
+
+  const norm = company.toLowerCase().replace(/[^a-z0-9]/g, '');
+  feedState.preferences.blockedCompanies = feedState.preferences.blockedCompanies.filter(bc => {
+    const bcNorm = (typeof bc === 'string' ? bc : bc.company || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    return bcNorm !== norm;
+  });
+
+  saveFeedState();
+  applyFilters();
+  renderFeed();
+  renderAnalytics();
+
+  // Refresh blocked chips UI if preferences panel is open
+  if (feedState.showPreferences) loadPreferencesUI();
+
+  showToast(`Unblocked ${company}`, 'success');
+}
+
 /* ====== FILTERING ====== */
 
 /**
@@ -1573,6 +2370,9 @@ function applyFilters() {
       const fuzzyMatches = findDuplicates(feedCandidate, existingCandidates, DEDUP_THRESHOLD);
       if (fuzzyMatches.length > 0) return false;
     }
+
+    // Exclude blocked companies
+    if (isCompanyBlocked(job.company)) return false;
 
     // Exclude dismissed jobs
     if (feedState.dismissed.has(job.id)) return false;
@@ -1759,6 +2559,12 @@ function loadPreferencesUI() {
   document.querySelectorAll('input[name="stage"]').forEach(checkbox => {
     checkbox.checked = (prefs.preferredStages || []).includes(checkbox.value);
   });
+
+  // Render blocked companies chips (extract company name from objects)
+  const blockedNames = (prefs.blockedCompanies || []).map(bc =>
+    typeof bc === 'string' ? bc : bc.company || ''
+  ).filter(n => n);
+  renderChips('pref-blocked-chips', 'pref-blocked-input', blockedNames);
 }
 
 /**
@@ -1768,9 +2574,19 @@ function savePreferences() {
   const titles = getChipValues('pref-titles-chips');
   const locations = getChipValues('pref-locations-chips');
   const minComp = document.getElementById('pref-min-comp').value;
+  const blockedNames = getChipValues('pref-blocked-chips');
 
   const stages = Array.from(document.querySelectorAll('input[name="stage"]:checked'))
     .map(cb => cb.value);
+
+  // Merge blocked companies: preserve timestamps for existing, add new ones
+  const existingBlocked = feedState.preferences.blockedCompanies || [];
+  const blockedCompanies = blockedNames.map(name => {
+    const existing = existingBlocked.find(bc =>
+      (typeof bc === 'string' ? bc : bc.company || '').toLowerCase() === name.toLowerCase()
+    );
+    return existing || { company: name, blockedAt: new Date().toISOString() };
+  });
 
   feedState.preferences = {
     ...feedState.preferences,
@@ -1778,6 +2594,7 @@ function savePreferences() {
     targetLocations: locations,
     minCompensation: minComp ? parseInt(minComp) : null,
     preferredStages: stages,
+    blockedCompanies: blockedCompanies,
   };
 
   saveFeedState();

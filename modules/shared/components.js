@@ -30,7 +30,7 @@ function renderNav(containerId, activeModule) {
     { key: 'job-feed',        label: 'Job Feed',        path: '../job-feed/index.html' },
     { key: 'pipeline',        label: 'Pipeline',        path: '../pipeline/index.html' },
     { key: 'research-brief',  label: 'Research Brief',  path: '../research-brief/index.html' },
-    { key: 'resume-tailor',   label: 'Resume Tailor',   path: '../resume-tailor/index.html' },
+    { key: 'resume-tailor',   label: 'Resumes',          path: '../resume-tailor/index.html' },
   ];
 
   const links = modules.map(m => {

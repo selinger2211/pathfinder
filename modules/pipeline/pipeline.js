@@ -32,6 +32,9 @@ let showStaleOnly = false;
 let useSemanticSearch = false;
 let semanticResultIds = []; // Stores IDs from semantic search
 
+/** @type {Set<string>} Role IDs that are stale based on stage-specific thresholds */
+let staleRoleIds = new Set();
+
 // ================================================================
 // DATA LAYER
 // ================================================================
@@ -433,12 +436,81 @@ function promptCloseReason(roleId, onConfirm) {
  */
 function computeWeightedScore(scoring) {
   if (!scoring) return 0;
-  const weights = { titleFit: 25, domainFit: 20, levelFit: 15, companyFit: 15, compensationFit: 15, locationFit: 10 };
+  /* Use canonical weights from score-engine.js (single source of truth).
+     SCORE_WEIGHTS values are 0-1 decimals (e.g. 0.17 for 17%).
+     Fall back to hardcoded weights only if score-engine isn't loaded. */
+  const weights = (typeof SCORE_WEIGHTS !== 'undefined') ? SCORE_WEIGHTS
+    : { titleFit: 0.15, networkFit: 0.12, domainFit: 0.18, levelFit: 0.10, companyFit: 0.08, compensationFit: 0.12, locationFit: 0.15, jdFit: 0.10 };
   let total = 0;
   for (const [key, weight] of Object.entries(weights)) {
-    total += (scoring[key] || 0) * weight / 100;
+    /* SCORE_WEIGHTS are 0-1 decimals; scoring dimensions are 0-100 integers */
+    total += (scoring[key] || 0) * weight;
   }
   return Math.round(total);
+}
+
+/**
+ * Run the score engine on a role object and populate role.scoring + role.score.
+ * Requires score-engine.js to be loaded (scoreFeedItem function).
+ * @param {Object} role - The role object (mutated in place)
+ * @returns {boolean} Whether scoring was applied
+ */
+function scoreRoleWithEngine(role) {
+  if (typeof scoreFeedItem !== 'function') {
+    console.warn('[Pipeline] scoreFeedItem not available — score-engine.js not loaded');
+    return false;
+  }
+  if (!role.jd || role.jd.length < 100) return false;
+
+  // Load user preferences
+  let preferences = {};
+  try {
+    const raw = localStorage.getItem('pf_preferences');
+    if (raw) preferences = JSON.parse(raw);
+  } catch (e) {
+    console.warn('[Pipeline] Could not load preferences for scoring:', e);
+  }
+
+  // Build the item object that scoreFeedItem expects
+  const item = {
+    title: role.title || '',
+    company: role.company || '',
+    location: role.location || '',
+    jd: role.jd,
+    companyStage: role.tier || ''
+  };
+
+  const result = scoreFeedItem(item, preferences);
+  if (result && result.scoring) {
+    role.scoring = result.scoring;
+    role.score = result.score;
+    role.scoreReasons = result.reasons;
+    role.scoreVersion = result.version;
+    role.scoredAt = Date.now();
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Score the currently open role in the detail panel, save, and re-render.
+ */
+function scoreCurrentRole() {
+  if (!editingRoleId) return;
+
+  const roles = getRoles();
+  const role = roles.find(r => r.id === editingRoleId);
+  if (!role) return;
+
+  if (scoreRoleWithEngine(role)) {
+    if (saveRoles(roles)) {
+      showToast(`Scored "${role.company}" — ${role.score}/100`, 'success');
+      // Re-open the detail panel to show updated assessment
+      openRoleDetail(role.id);
+    }
+  } else {
+    showToast('Could not score — ensure JD is filled and score engine is loaded', 'warning');
+  }
 }
 
 // ================================================================
@@ -533,6 +605,387 @@ async function semanticSearchRoles(query) {
 }
 
 // ================================================================
+// STALE ROLE DETECTION + NUDGE BANNERS
+// ================================================================
+
+/** Stage-specific staleness thresholds in days */
+const STALE_THRESHOLDS = {
+  discovered: 7,
+  researching: 10,
+  outreach: 14,
+  screen: 7,
+  interviewing: 10
+};
+
+/**
+ * Scan all roles and populate staleRoleIds set based on stage-specific thresholds.
+ * Roles in stages not listed in STALE_THRESHOLDS are never considered stale.
+ * Dismissed nudges (stored in pf_dismissed_nudges) are excluded.
+ */
+function detectStaleRoles() {
+  staleRoleIds = new Set();
+  const roles = getRoles();
+  const dismissed = getDismissedNudges();
+  const now = Date.now();
+
+  for (const role of roles) {
+    if (!role.id || !role.stage) continue;
+    const threshold = STALE_THRESHOLDS[role.stage];
+    if (threshold == null) continue;
+
+    const raw = role.lastActivity || role.updatedAt || role.dateAdded;
+    if (!raw) continue;
+    const ts = typeof raw === 'string' ? new Date(raw).getTime() : raw;
+    const daysSince = Math.floor((now - ts) / (1000 * 60 * 60 * 24));
+
+    if (daysSince >= threshold && !dismissed.has(role.id)) {
+      staleRoleIds.add(role.id);
+    }
+  }
+}
+
+/**
+ * Get the set of dismissed nudge role IDs from localStorage.
+ * @returns {Set<string>}
+ */
+function getDismissedNudges() {
+  try {
+    const raw = localStorage.getItem('pf_dismissed_nudges');
+    if (!raw) return new Set();
+    return new Set(JSON.parse(raw));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+/**
+ * Dismiss a stale nudge banner for a given role.
+ * Persists to pf_dismissed_nudges and removes the banner from the DOM.
+ * @param {string} roleId - The role ID to dismiss
+ */
+function dismissNudge(roleId) {
+  const dismissed = getDismissedNudges();
+  dismissed.add(roleId);
+  try {
+    localStorage.setItem('pf_dismissed_nudges', JSON.stringify([...dismissed]));
+  } catch (e) {
+    console.warn('[Pipeline] Failed to save dismissed nudges:', e);
+  }
+  staleRoleIds.delete(roleId);
+
+  // Remove the banner from the DOM without full re-render
+  const card = document.querySelector(`.role-card[data-role-id="${CSS.escape(roleId)}"]`);
+  if (card) {
+    const nudge = card.querySelector('.stale-nudge');
+    if (nudge) nudge.remove();
+  }
+}
+
+/**
+ * Calculate days since last activity for a role (for nudge display).
+ * @param {Object} role - Role object
+ * @returns {number} Days since last activity
+ */
+function getDaysSinceActivity(role) {
+  const raw = role.lastActivity || role.updatedAt || role.dateAdded;
+  if (!raw) return 0;
+  const ts = typeof raw === 'string' ? new Date(raw).getTime() : raw;
+  return Math.floor((Date.now() - ts) / (1000 * 60 * 60 * 24));
+}
+
+// ================================================================
+// STAGE TRANSITION VALIDATION
+// ================================================================
+
+/** Ordered stage list for forward/skip validation */
+const STAGE_ORDER = ['discovered', 'researching', 'outreach', 'applied', 'screen', 'interviewing', 'offer', 'closed'];
+
+/**
+ * Validate and optionally confirm a stage transition.
+ * Rules:
+ *   - Any stage can move to "closed" (handled separately via promptCloseReason)
+ *   - Backward moves are always allowed
+ *   - Forward skip of >1 stage shows a confirm dialog
+ *   - Moving to "outreach" without a resume shows a toast suggestion
+ *
+ * @param {Object} role - The role being moved
+ * @param {string} toStage - Target stage
+ * @returns {Promise<boolean>} Whether the transition should proceed
+ */
+async function validateStageTransition(role, toStage) {
+  if (!role || !toStage) return true;
+  const fromStage = role.stage;
+  if (fromStage === toStage) return true;
+  if (toStage === 'closed') return true; // Always allowed (close reason dialog handles UX)
+
+  const fromIdx = STAGE_ORDER.indexOf(fromStage);
+  const toIdx = STAGE_ORDER.indexOf(toStage);
+
+  // Unknown stages — allow
+  if (fromIdx === -1 || toIdx === -1) return true;
+
+  // Forward skip of more than 1 stage — confirm
+  if (toIdx > fromIdx + 1) {
+    const fromLabel = fromStage.charAt(0).toUpperCase() + fromStage.slice(1);
+    const toLabel = toStage.charAt(0).toUpperCase() + toStage.slice(1);
+    const skip = toIdx - fromIdx;
+    const confirmed = confirm(`Skip ${skip} stage${skip > 1 ? 's' : ''} from "${fromLabel}" to "${toLabel}"?`);
+    if (!confirmed) return false;
+  }
+
+  // Moving to "outreach" (Applying) stage — check for resume
+  if (toStage === 'outreach') {
+    const hasResume = role.pendingResumeRequest || role.resumePath;
+    if (!hasResume) {
+      showToast('No resume for this role — generate one?', 'warning');
+    }
+  }
+
+  return true;
+}
+
+// ================================================================
+// BATCH OPERATIONS
+// ================================================================
+
+/**
+ * Count roles that are eligible for batch scoring (missing scoring, have JD).
+ * @returns {{ eligible: Array, missingJd: number }}
+ */
+function countUnscoredRoles() {
+  const roles = getRoles();
+  const eligible = roles.filter(r => !r.scoring && r.jd && r.jd.length >= 100);
+  const missingJd = roles.filter(r => !r.scoring && (!r.jd || r.jd.length < 100)).length;
+  return { eligible, missingJd };
+}
+
+/**
+ * Count roles in "outreach" stage that have no resume.
+ * @returns {Array} Roles needing resume generation
+ */
+function countApplyingWithoutResume() {
+  const roles = getRoles();
+  return roles.filter(r =>
+    r.stage === 'outreach' &&
+    !r.pendingResumeRequest &&
+    !r.resumePath
+  );
+}
+
+/**
+ * Batch-score all unscored roles that have sufficient JD text.
+ * Shows progress toast on completion.
+ */
+async function batchScoreRoles() {
+  const { eligible, missingJd } = countUnscoredRoles();
+  if (eligible.length === 0) {
+    showToast('No unscored roles with JD to score', 'warning');
+    return;
+  }
+
+  const roles = getRoles();
+  let scored = 0;
+
+  for (const target of eligible) {
+    const role = roles.find(r => r.id === target.id);
+    if (role && scoreRoleWithEngine(role)) {
+      scored++;
+    }
+  }
+
+  saveRoles(roles);
+  render();
+
+  const suffix = missingJd > 0 ? ` (${missingJd} missing JD)` : '';
+  showToast(`Scored ${scored}/${eligible.length} roles${suffix}`, 'success');
+}
+
+/**
+ * Batch-queue resume generation for all roles in "outreach" stage without a resume.
+ * Posts to /api/resume-requests for each eligible role.
+ */
+async function batchGenerateResumes() {
+  const eligible = countApplyingWithoutResume();
+  if (eligible.length === 0) {
+    showToast('No Applying roles need resumes', 'warning');
+    return;
+  }
+
+  let queued = 0;
+  let failed = 0;
+  const roles = getRoles();
+
+  for (const target of eligible) {
+    const role = roles.find(r => r.id === target.id);
+    if (!role || !role.jd || role.jd.length < 100) {
+      failed++;
+      continue;
+    }
+
+    try {
+      const assessment = typeof generateFitAssessment === 'function'
+        ? generateFitAssessment(role) : null;
+
+      const payload = {
+        roleId: role.id,
+        company: role.company || 'Unknown',
+        title: role.title || 'Untitled',
+        salary: role.salary || (role.compensation && role.compensation.raw) || '',
+        jd: role.jd,
+        applicationType: role.applicationType || 'cold',
+        scoring: role.scoring || null,
+        score: role.score || 0,
+        fitAssessment: assessment ? {
+          overall: assessment.overallAssessment,
+          proofPointLabel: assessment.proofPointLabel,
+          recommendedFraming: assessment.recommendedFraming,
+          assessmentSummary: assessment.assessmentSummary,
+          strongMatches: assessment.strongMatches,
+          gaps: assessment.gaps,
+          borderline: assessment.borderline,
+        } : null,
+      };
+
+      const resp = await fetch('/api/resume-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (resp.ok) {
+        const result = await resp.json();
+        role.pendingResumeRequest = result.id;
+        role.lastActivity = Date.now();
+        queued++;
+      } else {
+        failed++;
+      }
+    } catch (err) {
+      console.warn('[Pipeline] Batch resume request failed for', role.id, err.message);
+      failed++;
+    }
+  }
+
+  if (queued > 0) saveRoles(roles);
+  render();
+
+  const msg = failed > 0
+    ? `Queued ${queued}/${eligible.length} resumes (${failed} failed — missing JD?)`
+    : `Queued ${queued} resume${queued !== 1 ? 's' : ''} for generation`;
+  showToast(msg, queued > 0 ? 'success' : 'warning');
+}
+
+/**
+ * Render the batch operations dropdown button in the toolbar.
+ * Inserts before the "New Role" button.
+ */
+function renderBatchDropdown() {
+  // Avoid duplicating
+  if (document.getElementById('batch-ops-wrapper')) return;
+
+  const addRoleBtn = document.getElementById('add-role-btn');
+  if (!addRoleBtn) return;
+
+  const { eligible: unscoredEligible } = countUnscoredRoles();
+  const applyingNoResume = countApplyingWithoutResume();
+
+  const wrapper = document.createElement('div');
+  wrapper.id = 'batch-ops-wrapper';
+  wrapper.style.cssText = 'position: relative; display: inline-block;';
+
+  const btn = document.createElement('button');
+  btn.className = 'toolbar-button';
+  btn.id = 'batch-ops-btn';
+  btn.innerHTML = `
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <polyline points="16 3 21 3 21 8"></polyline>
+      <line x1="4" y1="20" x2="21" y2="3"></line>
+      <polyline points="21 16 21 21 16 21"></polyline>
+      <line x1="15" y1="15" x2="21" y2="21"></line>
+      <line x1="4" y1="4" x2="9" y2="9"></line>
+    </svg>
+    <span>Batch Ops</span>
+  `;
+
+  const dropdown = document.createElement('div');
+  dropdown.id = 'batch-ops-dropdown';
+  dropdown.style.cssText = `
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background: var(--bg-surface);
+    border: 1px solid var(--bg-subtle);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg, 0 10px 25px rgba(0,0,0,0.15));
+    min-width: 260px;
+    z-index: 100;
+    overflow: hidden;
+  `;
+
+  dropdown.innerHTML = `
+    <div style="padding: 8px 12px; border-bottom: 1px solid var(--bg-subtle); font-size: 0.75rem; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px;">
+      Batch Operations
+    </div>
+    <button class="batch-op-item" data-batch-action="score" style="display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; background: none; border: none; cursor: pointer; font-size: 0.85rem; color: var(--text-primary); text-align: left; transition: background 0.15s;">
+      <span style="font-size: 1rem;">📊</span>
+      <span style="flex: 1;">Score all unscored roles</span>
+      <span style="background: var(--accent-subtle); color: var(--accent); padding: 2px 8px; border-radius: var(--radius-pill); font-size: 0.75rem; font-weight: 600;">${unscoredEligible.length}</span>
+    </button>
+    <button class="batch-op-item" data-batch-action="resumes" style="display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; background: none; border: none; cursor: pointer; font-size: 0.85rem; color: var(--text-primary); text-align: left; transition: background 0.15s;">
+      <span style="font-size: 1rem;">📄</span>
+      <span style="flex: 1;">Generate resumes for Applying roles</span>
+      <span style="background: var(--accent-subtle); color: var(--accent); padding: 2px 8px; border-radius: var(--radius-pill); font-size: 0.75rem; font-weight: 600;">${applyingNoResume.length}</span>
+    </button>
+  `;
+
+  wrapper.appendChild(btn);
+  wrapper.appendChild(dropdown);
+
+  // Insert before the add-role button
+  addRoleBtn.parentNode.insertBefore(wrapper, addRoleBtn);
+
+  // Toggle dropdown on click
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isOpen = dropdown.style.display === 'block';
+    dropdown.style.display = isOpen ? 'none' : 'block';
+
+    // Refresh counts when opening
+    if (!isOpen) {
+      const { eligible: fresh } = countUnscoredRoles();
+      const freshResumes = countApplyingWithoutResume();
+      const scoreBadge = dropdown.querySelector('[data-batch-action="score"] span:last-child');
+      const resumeBadge = dropdown.querySelector('[data-batch-action="resumes"] span:last-child');
+      if (scoreBadge) scoreBadge.textContent = fresh.length;
+      if (resumeBadge) resumeBadge.textContent = freshResumes.length;
+    }
+  });
+
+  // Close dropdown on outside click
+  document.addEventListener('click', () => {
+    dropdown.style.display = 'none';
+  });
+
+  // Handle batch action clicks via delegation
+  dropdown.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const item = e.target.closest('[data-batch-action]');
+    if (!item) return;
+
+    const action = item.dataset.batchAction;
+    dropdown.style.display = 'none';
+
+    if (action === 'score') {
+      batchScoreRoles();
+    } else if (action === 'resumes') {
+      batchGenerateResumes();
+    }
+  });
+}
+
+// ================================================================
 // RENDER FUNCTIONS
 // ================================================================
 
@@ -586,13 +1039,17 @@ function renderKanban() {
     cards.addEventListener('dragleave', () => {
       cards.classList.remove('drag-over');
     });
-    cards.addEventListener('drop', (e) => {
+    cards.addEventListener('drop', async (e) => {
       e.preventDefault();
       cards.classList.remove('drag-over');
       if (draggedRoleId) {
         const roles = getRoles();
         const role = roles.find(r => r.id === draggedRoleId);
         if (role) {
+          // Stage transition validation
+          const allowed = await validateStageTransition(role, stage);
+          if (!allowed) return;
+
           if (stage === 'closed') {
             const fromStage = role.stage; // Capture before mutation
             promptCloseReason(role.id, (reason, notes) => {
@@ -609,11 +1066,14 @@ function renderKanban() {
               showToast(`Closed: ${reason}`, 'success');
             });
           } else {
+            const fromStage = role.stage;
             role.stage = stage;
             role.lastActivity = Date.now();
             // Add to stage history
             if (!role.stageHistory) role.stageHistory = [];
-            role.stageHistory.push({ stage, timestamp: Date.now() });
+            role.stageHistory.push({ stage, timestamp: Date.now(), fromStage });
+            // Record conversion analytics
+            recordConversionEvent(role, fromStage, stage);
             saveRoles(roles);
             render();
             showToast(`Moved to ${stage}`, 'success');
@@ -831,6 +1291,7 @@ function createRoleCard(role) {
         return '';
       })()}
       ${role.location ? `<span class="role-stat">📍 ${escapeHtml(role.location.substring(0, 15))}</span>` : ''}
+      ${role.jd && role.jd.length > 100 && role.scoring ? `<span class="role-stat" title="Resume ready — JD and scoring available" style="cursor: help;">📄</span>` : ''}
     </div>
 
     ${role.source && role.source !== 'n/a' && role.source !== 'N/A' ? `
@@ -850,6 +1311,27 @@ function createRoleCard(role) {
       <button class="role-card-action" data-action="edit" title="Edit">Edit</button>
     </div>
   `;
+
+  // Stale nudge banner
+  if (staleRoleIds.has(role.id)) {
+    const days = getDaysSinceActivity(role);
+    const nudge = document.createElement('div');
+    nudge.className = 'stale-nudge';
+    nudge.innerHTML = `
+      <span>⏰ No activity in ${days} days</span>
+      <span style="display: flex; gap: 4px;">
+        <button class="stale-nudge-dismiss" data-nudge-role-id="${escapeHtml(role.id)}" style="background: none; border: none; cursor: pointer; font-size: 0.65rem; color: #92400E; padding: 2px 4px;">✕</button>
+      </span>
+    `;
+    card.appendChild(nudge);
+
+    // Dismiss handler via data attribute
+    nudge.querySelector('.stale-nudge-dismiss').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const rid = e.currentTarget.dataset.nudgeRoleId;
+      if (rid) dismissNudge(rid);
+    });
+  }
 
   // Event listeners
   card.addEventListener('dragstart', (e) => {
@@ -1026,6 +1508,715 @@ function formatFileSize(bytes) {
 }
 
 // ================================================================
+// FIT ASSESSMENT & RESUME GENERATION
+// ================================================================
+
+/**
+ * Render the Fit Assessment section for the detail panel.
+ * Shows strong matches, gaps, borderline dimensions, proof point recommendation,
+ * application type toggle, and Generate Resume button.
+ * Only renders if the role has scoring data and a JD.
+ * @param {Object} role - The role object
+ * @returns {string} HTML string
+ */
+function renderFitAssessmentSection(role) {
+  // Need both scoring data and JD to generate assessment
+  if (!role.scoring || !role.jd || role.jd.length < 100) {
+    const hasJd = role.jd && role.jd.length >= 100;
+    return `
+    <div class="detail-section">
+      <div class="detail-section-title">Fit Assessment</div>
+      <div style="color: var(--text-tertiary); font-size: 0.85rem; padding: var(--space-2) 0;">
+        ${!hasJd
+          ? 'Paste a job description below to generate a fit assessment.'
+          : `<span>No score data yet.</span>
+             <button onclick="scoreCurrentRole()" style="margin-left: 8px; padding: 4px 12px; font-size: 0.8rem; background: var(--accent); color: white; border: none; border-radius: var(--radius-sm); cursor: pointer;">Score Role</button>`}
+      </div>
+    </div>`;
+  }
+
+  // Generate assessment if not available
+  if (typeof generateFitAssessment !== 'function') {
+    return '';
+  }
+
+  const assessment = generateFitAssessment(role);
+
+  // Overall assessment badge color
+  const assessmentColors = {
+    strong: { bg: '#dcfce7', text: '#166534', label: 'Strong Match' },
+    moderate: { bg: '#fef9c3', text: '#854d0e', label: 'Moderate Match' },
+    stretch: { bg: '#fee2e2', text: '#991b1b', label: 'Stretch' }
+  };
+  const badge = assessmentColors[assessment.overallAssessment] || assessmentColors.moderate;
+
+  // Strong matches
+  const strongHtml = assessment.strongMatches.length > 0
+    ? assessment.strongMatches.map(m =>
+        `<div style="display: flex; align-items: baseline; gap: var(--space-2); margin-bottom: 4px;">
+          <span style="color: var(--success); font-weight: 600; font-size: 0.8rem; min-width: 28px;">${m.score}</span>
+          <span style="font-size: 0.85rem; color: var(--text-primary);">${escapeHtml(m.dimension)}</span>
+          <span style="font-size: 0.8rem; color: var(--text-tertiary);">— ${escapeHtml(m.reason)}</span>
+        </div>`
+      ).join('')
+    : '<div style="font-size: 0.8rem; color: var(--text-tertiary);">No strong signals detected</div>';
+
+  // Gaps
+  const gapsHtml = assessment.gaps.length > 0
+    ? assessment.gaps.map(g =>
+        `<div style="display: flex; align-items: baseline; gap: var(--space-2); margin-bottom: 4px;">
+          <span style="color: var(--error); font-weight: 600; font-size: 0.8rem; min-width: 28px;">${g.score}</span>
+          <span style="font-size: 0.85rem; color: var(--text-primary);">${escapeHtml(g.dimension)}</span>
+          <span style="font-size: 0.8rem; color: var(--text-tertiary);">— ${escapeHtml(g.reason)}</span>
+          ${g.severity === 'hard' ? '<span style="font-size: 0.7rem; background: #fee2e2; color: #991b1b; padding: 1px 6px; border-radius: 4px; margin-left: 4px;">hard gap</span>' : ''}
+        </div>`
+      ).join('')
+    : '';
+
+  // Borderline
+  const borderlineHtml = assessment.borderline.length > 0
+    ? assessment.borderline.map(b =>
+        `<div style="margin-bottom: 6px;">
+          <div style="display: flex; align-items: baseline; gap: var(--space-2);">
+            <span style="color: var(--warning); font-weight: 600; font-size: 0.8rem; min-width: 28px;">${b.score}</span>
+            <span style="font-size: 0.85rem; color: var(--text-primary);">${escapeHtml(b.dimension)}</span>
+          </div>
+          <div style="font-size: 0.8rem; color: var(--text-tertiary); padding-left: 36px; font-style: italic;">${escapeHtml(b.advice)}</div>
+        </div>`
+      ).join('')
+    : '';
+
+  // Application type toggle
+  const appType = role.applicationType || '';
+  const coldActive = appType === 'cold' ? 'background: var(--accent); color: white;' : 'background: var(--bg-base); color: var(--text-secondary);';
+  const referredActive = appType === 'referred' ? 'background: var(--accent); color: white;' : 'background: var(--bg-base); color: var(--text-secondary);';
+
+  return `
+    <div class="detail-section">
+      <div class="detail-section-title" style="display: flex; align-items: center; justify-content: space-between;">
+        Fit Assessment
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="background: ${badge.bg}; color: ${badge.text}; font-size: 0.75rem; font-weight: 600; padding: 2px 10px; border-radius: 12px; text-transform: uppercase; letter-spacing: 0.03em;">${badge.label}</span>
+          <button onclick="scoreCurrentRole()" title="Re-score this role" style="padding: 2px 8px; font-size: 0.7rem; background: var(--bg-subtle); color: var(--text-secondary); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer;">Re-score</button>
+        </div>
+      </div>
+
+      <!-- Proof Point Recommendation -->
+      <div style="background: var(--bg-base); border: 1px solid var(--bg-subtle); border-radius: var(--radius-md); padding: var(--space-3); margin-bottom: var(--space-3);">
+        <div style="font-size: 0.8rem; font-weight: 600; color: var(--accent); margin-bottom: 4px;">${escapeHtml(assessment.proofPointLabel)}</div>
+        <div style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.4;">${escapeHtml(assessment.assessmentSummary)}</div>
+      </div>
+
+      <!-- Strong Matches -->
+      ${assessment.strongMatches.length > 0 ? `
+      <div style="margin-bottom: var(--space-3);">
+        <div style="font-size: 0.75rem; font-weight: 600; color: var(--success); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Strong Matches</div>
+        ${strongHtml}
+      </div>` : ''}
+
+      <!-- Gaps -->
+      ${assessment.gaps.length > 0 ? `
+      <div style="margin-bottom: var(--space-3);">
+        <div style="font-size: 0.75rem; font-weight: 600; color: var(--error); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Gaps</div>
+        ${gapsHtml}
+      </div>` : ''}
+
+      <!-- Positioning Notes -->
+      ${assessment.borderline.length > 0 ? `
+      <div style="margin-bottom: var(--space-3);">
+        <div style="font-size: 0.75rem; font-weight: 600; color: var(--warning); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Positioning Notes</div>
+        ${borderlineHtml}
+      </div>` : ''}
+
+      <!-- Application Type Toggle -->
+      <div style="margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--bg-subtle);">
+        <div class="detail-field-label" style="margin-bottom: 6px;">Application Type</div>
+        <div style="display: flex; gap: var(--space-2);">
+          <button onclick="setApplicationType('cold')" style="flex: 1; padding: 6px 12px; border: 1px solid var(--bg-subtle); border-radius: var(--radius-md); cursor: pointer; font-size: 0.85rem; font-weight: 500; transition: all 150ms ease; ${coldActive}">Cold Apply</button>
+          <button onclick="setApplicationType('referred')" style="flex: 1; padding: 6px 12px; border: 1px solid var(--bg-subtle); border-radius: var(--radius-md); cursor: pointer; font-size: 0.85rem; font-weight: 500; transition: all 150ms ease; ${referredActive}">Referred</button>
+        </div>
+      </div>
+
+      <!-- Resume Status (loaded async) -->
+      <div id="resume-status-container"></div>
+
+      <!-- Generate Resume Button -->
+      <div style="margin-top: var(--space-3);">
+        <button onclick="generateResumePrompt()" id="btn-generate-resume" style="width: 100%; padding: 10px 16px; background: var(--accent); color: white; border: none; border-radius: var(--radius-md); cursor: pointer; font-size: 0.9rem; font-weight: 600; transition: all 150ms ease; display: flex; align-items: center; justify-content: center; gap: var(--space-2);"
+          onmouseover="this.style.background='var(--accent-hover)'" onmouseout="this.style.background='var(--accent)'">
+          Generate Resume
+        </button>
+      </div>
+    </div>`;
+}
+
+/**
+ * Set the application type (cold or referred) on the current role.
+ * @param {string} type - 'cold' or 'referred'
+ */
+function setApplicationType(type) {
+  if (!editingRoleId) return;
+
+  const roles = getRoles();
+  const role = roles.find(r => r.id === editingRoleId);
+  if (!role) return;
+
+  // Toggle: clicking the same type clears it
+  role.applicationType = role.applicationType === type ? '' : type;
+  role.lastActivity = Date.now();
+  saveRoles(roles);
+
+  // Re-render the detail panel to update the toggle state
+  openRoleDetail(editingRoleId);
+  showToast(`Application type: ${role.applicationType || 'not set'}`, 'info');
+}
+
+/**
+ * Generate a tailored resume directly from the pipeline.
+ * If the role has no JD but has a URL, fetches the JD first.
+ * Calls POST /api/generate-resume which runs the deterministic
+ * resume generator synchronously and returns the PDF URL.
+ * No queues, no scheduled tasks.
+ */
+async function generateResumePrompt() {
+  if (!editingRoleId) return;
+
+  const roles = getRoles();
+  const role = roles.find(r => r.id === editingRoleId);
+  if (!role) return;
+
+  // Grab button reference and create progress status area
+  const resumeBtn = document.getElementById('btn-generate-resume');
+
+  // Create or get progress status element below the button
+  let progressEl = document.getElementById('resume-gen-progress');
+  if (!progressEl) {
+    progressEl = document.createElement('div');
+    progressEl.id = 'resume-gen-progress';
+    progressEl.style.cssText = 'margin-top: 8px; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6;';
+    if (resumeBtn && resumeBtn.parentElement) {
+      resumeBtn.parentElement.appendChild(progressEl);
+    }
+  }
+  progressEl.innerHTML = '';
+
+  /** Show a progress step with checkmark or spinner */
+  function showStep(text, done) {
+    const icon = done ? '✓' : '◦';
+    const color = done ? 'var(--success, #16a34a)' : 'var(--text-tertiary)';
+    // Update the last pending step to done, then add new step
+    const steps = progressEl.querySelectorAll('.resume-step');
+    if (done && steps.length > 0) {
+      // Mark the matching step as done
+      for (const step of steps) {
+        if (step.dataset.text === text) {
+          step.innerHTML = `<span style="color: var(--success, #16a34a);">✓</span> ${text}`;
+          step.dataset.done = 'true';
+          return;
+        }
+      }
+    }
+    const stepDiv = document.createElement('div');
+    stepDiv.className = 'resume-step';
+    stepDiv.dataset.text = text;
+    stepDiv.dataset.done = done ? 'true' : 'false';
+    stepDiv.innerHTML = done
+      ? `<span style="color: var(--success, #16a34a);">✓</span> ${text}`
+      : `<span class="spinner-sm" style="width: 12px; height: 12px; display: inline-block; vertical-align: middle;"></span> ${text}`;
+    progressEl.appendChild(stepDiv);
+  }
+
+  if (resumeBtn) {
+    resumeBtn.disabled = true;
+    resumeBtn.innerHTML = '<span class="spinner-sm"></span> Generating...';
+  }
+
+  try {
+    // Step 1: Ensure we have a JD
+    if (!role.jd || role.jd.length < 100) {
+      if (role.url) {
+        showStep('Fetching JD from posting URL...');
+        const fetchResp = await fetch('/api/fetch-jd', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: role.url }),
+        });
+        if (!fetchResp.ok) throw new Error(`JD fetch failed: ${fetchResp.status}`);
+        const fetchResult = await fetchResp.json();
+
+        if (fetchResult.text && fetchResult.text.length >= 100) {
+          role.jd = fetchResult.text;
+          role.lastActivity = Date.now();
+          saveRoles(roles);
+          showStep('Fetching JD from posting URL...', true);
+
+          // Also update the JD textarea if it's visible
+          const jdInput = document.getElementById('detail-jd-input');
+          if (jdInput) jdInput.value = role.jd;
+        } else {
+          showStep('Fetching JD from posting URL...', true);
+          progressEl.innerHTML += '<div style="color: var(--error, #dc2626);">Could not extract usable JD from URL. Paste it manually.</div>';
+          return;
+        }
+      } else {
+        showToast('Add a job description or posting URL first', 'error');
+        return;
+      }
+    } else {
+      showStep('JD loaded (' + Math.round(role.jd.length / 100) * 100 + '+ chars)', true);
+    }
+
+    // Step 2: Generate fit assessment
+    showStep('Running fit assessment...');
+    const assessment = typeof generateFitAssessment === 'function'
+      ? generateFitAssessment(role)
+      : null;
+    showStep('Running fit assessment...', true);
+
+    // Step 3: Send to resume generator
+    showStep('Analyzing JD, selecting bullets, generating DOCX...');
+
+    const payload = {
+      roleId: role.id,
+      company: role.company,
+      title: role.title,
+      location: role.location || '',
+      salary: role.salary || (role.compensation && role.compensation.raw) || '',
+      jd: role.jd,
+      applicationType: role.applicationType || 'cold',
+      scoring: role.scoring || null,
+      score: role.score || 0,
+      fitAssessment: assessment ? {
+        overall: assessment.overallAssessment,
+        proofPointLabel: assessment.proofPointLabel,
+        recommendedFraming: assessment.recommendedFraming,
+        assessmentSummary: assessment.assessmentSummary,
+        strongMatches: assessment.strongMatches,
+        gaps: assessment.gaps,
+        borderline: assessment.borderline,
+      } : null,
+    };
+
+    const resp = await fetch('/api/generate-resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      throw new Error(errData.error || `Server error: ${resp.status}`);
+    }
+
+    const result = await resp.json();
+    showStep('Analyzing JD, selecting bullets, generating DOCX...', true);
+
+    // Step 4: Show results summary
+    const domainLabels = {
+      'enterprise-ai': 'Enterprise AI',
+      'ai-adtech': 'AI/AdTech',
+      'privacy-governance': 'Privacy/Governance',
+      'platform-infra': 'Platform/Infrastructure',
+    };
+    const bs = result.bulletsSelected || {};
+    const totalBullets = Object.values(bs).reduce((a, b) => a + b, 0);
+    const fmt = result.outputFormat || 'pdf';
+    const pageInfo = result.pageCount ? `${result.pageCount} page, ` : '';
+    showStep(`${fmt.toUpperCase()} ready – ${pageInfo}${domainLabels[result.domain] || result.domain} angle, ${totalBullets} bullets, ${result.jdKeywordsMatched} keywords matched`, true);
+
+    // Save the resume info on the role for status tracking
+    role.pendingResumeRequest = null;
+    role.lastResumeId = result.id;
+    role.lastResumePdf = result.outputFilename || result.pdfFilename;
+    role.lastResumeUrl = result.downloadUrl || result.pdfUrl;
+    role.lastResumeFormat = result.outputFormat || 'pdf';
+    role.lastResumeGenerated = Date.now();
+    role.lastActivity = Date.now();
+    saveRoles(roles);
+
+    showToast(`Resume generated for ${role.company}`, 'success');
+
+    // Re-render detail to show download link
+    openRoleDetail(editingRoleId);
+
+  } catch (err) {
+    console.error('[Pipeline] Resume generation failed:', err);
+    // Show error in progress area
+    const errDiv = document.createElement('div');
+    errDiv.style.cssText = 'color: var(--error, #dc2626); margin-top: 4px;';
+    errDiv.textContent = 'Failed: ' + err.message;
+    if (progressEl) progressEl.appendChild(errDiv);
+    showToast(`Resume generation failed: ${err.message}`, 'error');
+  } finally {
+    if (resumeBtn) {
+      resumeBtn.disabled = false;
+      resumeBtn.innerHTML = 'Generate Resume';
+    }
+  }
+}
+
+/**
+ * Check resume generation status for the current role and update UI.
+ */
+async function checkResumeStatus(roleId) {
+  try {
+    const resp = await fetch(`/api/role-resumes/${roleId}`);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.resumes || [];
+  } catch (err) {
+    console.warn('[Pipeline] Failed to check resume status:', err);
+    return null;
+  }
+}
+
+/**
+ * Render resume status section for the detail panel.
+ * Shows pending requests, completed resumes with download links, and version history.
+ */
+function renderResumeStatus(resumes) {
+  if (!resumes || resumes.length === 0) return '';
+
+  const completed = resumes.filter(r => r.status === 'completed' && r.pdfFilename);
+  const pending = resumes.filter(r => r.status === 'pending' || r.status === 'generating');
+  const failed = resumes.filter(r => r.status === 'failed');
+
+  let html = '';
+
+  // Pending indicator
+  if (pending.length > 0) {
+    html += `
+      <div style="display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fef9c3; border-radius: var(--radius-md); margin-bottom: var(--space-2); font-size: 0.85rem; color: #854d0e;">
+        <span class="spinner-sm"></span>
+        Resume generation in progress... (queued ${new Date(pending[0].createdAt).toLocaleString()})
+      </div>`;
+  }
+
+  // Completed resumes
+  if (completed.length > 0) {
+    const latest = completed[0];
+    html += `
+      <div style="border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-3); margin-bottom: var(--space-2);">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+          <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-primary);">Latest Resume</div>
+          <span style="font-size: 0.75rem; color: var(--text-tertiary);">${new Date(latest.updatedAt).toLocaleString()}</span>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <a href="/api/generated-resumes/${encodeURIComponent(latest.pdfFilename)}" target="_blank"
+            style="flex: 1; padding: 8px 12px; background: var(--accent); color: white; border: none; border-radius: var(--radius-sm); cursor: pointer; font-size: 0.85rem; font-weight: 500; text-align: center; text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 6px;">
+            View PDF
+          </a>
+          <a href="/api/generated-resumes/${encodeURIComponent(latest.pdfFilename)}" download="${latest.pdfFilename}"
+            style="padding: 8px 12px; background: var(--bg-subtle); color: var(--text-secondary); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 0.85rem; text-decoration: none; display: flex; align-items: center; justify-content: center;">
+            Download
+          </a>
+        </div>
+      </div>`;
+
+    // Version history (if more than 1)
+    if (completed.length > 1) {
+      html += `
+        <details style="margin-bottom: var(--space-2);">
+          <summary style="font-size: 0.8rem; color: var(--text-tertiary); cursor: pointer; margin-bottom: 4px;">
+            ${completed.length - 1} previous version${completed.length > 2 ? 's' : ''}
+          </summary>
+          ${completed.slice(1).map(r => `
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 4px 0; font-size: 0.8rem;">
+              <span style="color: var(--text-tertiary);">${new Date(r.updatedAt).toLocaleString()}</span>
+              <a href="/api/generated-resumes/${encodeURIComponent(r.pdfFilename)}" target="_blank" style="color: var(--accent); text-decoration: none;">View</a>
+            </div>
+          `).join('')}
+        </details>`;
+    }
+  }
+
+  // Failed requests
+  if (failed.length > 0) {
+    html += `
+      <div style="padding: 8px 12px; background: #fee2e2; border-radius: var(--radius-md); margin-bottom: var(--space-2); font-size: 0.8rem; color: #991b1b;">
+        Last generation failed: ${escapeHtml(failed[0].error || 'Unknown error')}
+      </div>`;
+  }
+
+  return html;
+}
+
+// ================================================================
+// OUTREACH DRAFTING
+// ================================================================
+
+/**
+ * Render the Outreach section for the detail panel.
+ * Provides message type selector, recipient info inputs, draft button,
+ * and a display area for generated outreach drafts.
+ * @param {Object} role - The role object
+ * @returns {string} HTML string
+ */
+function renderOutreachSection(role) {
+  if (!role.jd || role.jd.length < 100) {
+    return `
+    <div class="detail-section">
+      <div class="detail-section-title">Outreach</div>
+      <div style="color: var(--text-tertiary); font-size: 0.85rem; padding: var(--space-2) 0;">
+        Add a job description first to enable outreach drafting.
+      </div>
+    </div>`;
+  }
+
+  var templates = typeof getOutreachTemplates === 'function' ? getOutreachTemplates() : [];
+  var typeOptions = templates.map(function (t) {
+    return '<option value="' + t.type + '">' + escapeHtml(t.name) + '</option>';
+  }).join('');
+
+  return `
+    <div class="detail-section">
+      <div class="detail-section-title">Outreach</div>
+
+      <!-- Message Type Selector -->
+      <div class="detail-field">
+        <div class="detail-field-label">Message Type</div>
+        <select id="outreach-type-select" class="form-select">
+          ${typeOptions}
+        </select>
+      </div>
+
+      <!-- Recipient Info -->
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); margin-bottom: var(--space-3);">
+        <div class="detail-field" style="margin-bottom: 0;">
+          <div class="detail-field-label">Recipient Name</div>
+          <input type="text" id="outreach-recipient-name" class="form-input" placeholder="e.g., Jane Smith">
+        </div>
+        <div class="detail-field" style="margin-bottom: 0;">
+          <div class="detail-field-label">Recipient Title</div>
+          <input type="text" id="outreach-recipient-title" class="form-input" placeholder="e.g., VP Engineering">
+        </div>
+      </div>
+      <div class="detail-field">
+        <div class="detail-field-label">Relationship</div>
+        <select id="outreach-relationship" class="form-select">
+          <option value="none">No connection</option>
+          <option value="1st_degree">1st degree</option>
+          <option value="2nd_degree">2nd degree</option>
+        </select>
+      </div>
+
+      <!-- Draft Outreach Button -->
+      <div style="margin-top: var(--space-2);">
+        <button onclick="submitOutreachRequest()" id="btn-draft-outreach" style="width: 100%; padding: 10px 16px; background: var(--accent); color: white; border: none; border-radius: var(--radius-md); cursor: pointer; font-size: 0.9rem; font-weight: 600; transition: all 150ms ease; display: flex; align-items: center; justify-content: center; gap: var(--space-2);"
+          onmouseover="this.style.background='var(--accent-hover)'" onmouseout="this.style.background='var(--accent)'">
+          Draft Outreach
+        </button>
+      </div>
+
+      <!-- Outreach Drafts Display (loaded async) -->
+      <div id="outreach-drafts-container" style="margin-top: var(--space-3);"></div>
+    </div>`;
+}
+
+/**
+ * Submit an outreach drafting request to the server queue.
+ * Cowork scheduled task will pick it up and generate the message.
+ */
+async function submitOutreachRequest() {
+  if (!editingRoleId) return;
+
+  var roles = getRoles();
+  var role = roles.find(function (r) { return r.id === editingRoleId; });
+  if (!role) return;
+
+  if (!role.jd || role.jd.length < 100) {
+    showToast('Add a job description first', 'error');
+    return;
+  }
+
+  var msgType = document.getElementById('outreach-type-select');
+  var recipName = document.getElementById('outreach-recipient-name');
+  var recipTitle = document.getElementById('outreach-recipient-title');
+  var relationship = document.getElementById('outreach-relationship');
+
+  if (!msgType || !recipName) return;
+
+  var btn = document.getElementById('btn-draft-outreach');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-sm"></span> Queuing...';
+  }
+
+  try {
+    var payload = {
+      roleId: role.id,
+      company: role.company || '',
+      title: role.title || '',
+      messageType: msgType.value,
+      recipient: {
+        name: recipName.value.trim() || '',
+        title: recipTitle ? recipTitle.value.trim() : '',
+        relationship: relationship ? relationship.value : 'none'
+      },
+      jd: role.jd,
+      scoring: role.scoring || null,
+      score: role.score || 0
+    };
+
+    var resp = await fetch('/api/outreach-requests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!resp.ok) throw new Error('Server error: ' + resp.status);
+    var result = await resp.json();
+
+    role.pendingOutreachRequest = result.id;
+    role.lastActivity = Date.now();
+    saveRoles(roles);
+
+    showToast('Outreach draft queued — Cowork will generate your message shortly', 'success');
+    openRoleDetail(editingRoleId);
+
+  } catch (err) {
+    console.error('[Pipeline] Outreach request failed:', err);
+    showToast('Failed to queue outreach: ' + err.message, 'error');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = 'Draft Outreach';
+    }
+  }
+}
+
+/**
+ * Check outreach draft status for a role and return drafts array.
+ * @param {string} roleId - Role ID to check
+ * @returns {Promise<Array|null>} Array of outreach request objects or null
+ */
+async function checkOutreachStatus(roleId) {
+  try {
+    var resp = await fetch('/api/role-outreach/' + roleId);
+    if (!resp.ok) return null;
+    var data = await resp.json();
+    return data.outreach || [];
+  } catch (err) {
+    console.warn('[Pipeline] Failed to check outreach status:', err);
+    return null;
+  }
+}
+
+/**
+ * Render outreach drafts section for the detail panel.
+ * Shows pending requests, completed drafts with copy button, and version history.
+ * @param {Array} drafts - Array of outreach request objects
+ * @returns {string} HTML string
+ */
+function renderOutreachDrafts(drafts) {
+  if (!drafts || drafts.length === 0) return '';
+
+  var completed = drafts.filter(function (d) { return d.status === 'completed' && d.result; });
+  var pending = drafts.filter(function (d) { return d.status === 'pending' || d.status === 'generating'; });
+  var failed = drafts.filter(function (d) { return d.status === 'failed'; });
+
+  var html = '';
+
+  /* Pending indicator */
+  if (pending.length > 0) {
+    html += `
+      <div style="display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fef9c3; border-radius: var(--radius-md); margin-bottom: var(--space-2); font-size: 0.85rem; color: #854d0e;">
+        <span class="spinner-sm"></span>
+        Outreach draft in progress... (queued ${new Date(pending[0].createdAt).toLocaleString()})
+      </div>`;
+  }
+
+  /* Completed drafts */
+  if (completed.length > 0) {
+    var latest = completed[0];
+    var result = typeof latest.result === 'string' ? latest.result : (latest.result && latest.result.message ? latest.result.message : '');
+    var charCount = result.length;
+    var tmpl = typeof getOutreachTemplate === 'function' ? getOutreachTemplate(latest.messageType) : null;
+    var charLimit = tmpl ? tmpl.charLimit : 0;
+    var limitColor = charLimit && charCount > charLimit ? 'var(--error)' : 'var(--success)';
+    var subjectLine = latest.result && latest.result.subject ? latest.result.subject : '';
+    var typeName = tmpl ? tmpl.name : latest.messageType;
+
+    html += `
+      <div style="border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-3); margin-bottom: var(--space-2);">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+          <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-primary);">Latest Draft — ${escapeHtml(typeName)}</div>
+          <span style="font-size: 0.75rem; color: var(--text-tertiary);">${new Date(latest.updatedAt || latest.createdAt).toLocaleString()}</span>
+        </div>
+        ${subjectLine ? '<div style="font-size: 0.8rem; color: var(--accent); margin-bottom: 8px;"><strong>Subject:</strong> ' + escapeHtml(subjectLine) + '</div>' : ''}
+        <div id="outreach-draft-text" style="background: var(--bg-base); border: 1px solid var(--bg-subtle); border-radius: var(--radius-sm); padding: var(--space-3); font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6; white-space: pre-wrap; max-height: 300px; overflow-y: auto;">${escapeHtml(result)}</div>
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 8px;">
+          <span style="font-size: 0.75rem; color: ${limitColor};">${charCount} chars${charLimit ? ' / ' + charLimit + ' limit' : ''}</span>
+          <button onclick="copyOutreachDraft()" style="padding: 6px 14px; background: var(--bg-subtle); color: var(--text-secondary); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 0.8rem; font-weight: 500;">Copy to Clipboard</button>
+        </div>
+      </div>`;
+
+    /* Version history (if more than 1) */
+    if (completed.length > 1) {
+      html += `
+        <details style="margin-bottom: var(--space-2);">
+          <summary style="font-size: 0.8rem; color: var(--text-tertiary); cursor: pointer; margin-bottom: 4px;">
+            ${completed.length - 1} previous draft${completed.length > 2 ? 's' : ''}
+          </summary>
+          ${completed.slice(1).map(function (d) {
+            var dTypeName = typeof getOutreachTemplate === 'function' && getOutreachTemplate(d.messageType) ? getOutreachTemplate(d.messageType).name : d.messageType;
+            return '<div style="display: flex; align-items: center; justify-content: space-between; padding: 4px 0; font-size: 0.8rem;">' +
+              '<span style="color: var(--text-tertiary);">' + escapeHtml(dTypeName) + ' — ' + new Date(d.updatedAt || d.createdAt).toLocaleString() + '</span>' +
+              '<button onclick="showPreviousOutreachDraft(\'' + escapeHtml(d.id) + '\')" style="color: var(--accent); background: none; border: none; cursor: pointer; font-size: 0.8rem;">View</button>' +
+            '</div>';
+          }).join('')}
+        </details>`;
+    }
+  }
+
+  /* Failed requests */
+  if (failed.length > 0) {
+    html += `
+      <div style="padding: 8px 12px; background: #fee2e2; border-radius: var(--radius-md); margin-bottom: var(--space-2); font-size: 0.8rem; color: #991b1b;">
+        Last draft failed: ${escapeHtml(failed[0].error || 'Unknown error')}
+      </div>`;
+  }
+
+  return html;
+}
+
+/**
+ * Copy the latest outreach draft text to the clipboard.
+ */
+function copyOutreachDraft() {
+  var el = document.getElementById('outreach-draft-text');
+  if (!el) return;
+
+  var text = el.textContent || el.innerText;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () {
+      showToast('Copied to clipboard', 'success');
+    }).catch(function () {
+      showToast('Failed to copy', 'error');
+    });
+  } else {
+    showToast('Clipboard not available', 'error');
+  }
+}
+
+/**
+ * Show a previous outreach draft by ID (loads from server and swaps display).
+ * @param {string} draftId - The outreach request ID
+ */
+async function showPreviousOutreachDraft(draftId) {
+  if (!editingRoleId) return;
+  var drafts = await checkOutreachStatus(editingRoleId);
+  if (!drafts) return;
+  var draft = drafts.find(function (d) { return d.id === draftId; });
+  if (!draft || !draft.result) return;
+
+  var el = document.getElementById('outreach-draft-text');
+  if (el) {
+    var msg = typeof draft.result === 'string' ? draft.result : (draft.result.message || '');
+    el.textContent = msg;
+  }
+}
+
+// ================================================================
 // DETAIL PANEL
 // ================================================================
 
@@ -1120,7 +2311,19 @@ function openRoleDetail(roleId) {
     bodyHtml += intelSection;
   }
 
+  // Auto-populate salary from JD if salary is empty and JD exists
+  const autoSalary = (() => {
+    if (role.salary) return role.salary;
+    if (role.jd && role.jd.length > 50 && typeof processJD === 'function') {
+      const extracted = processJD(role.jd);
+      if (extracted.salary) return extracted.salary;
+    }
+    if (role.compensation && role.compensation.raw) return role.compensation.raw;
+    return '';
+  })();
+
   bodyHtml += `
+    <!-- ===== 1. BASIC INFO (company, title, location, source, URL) ===== -->
     <div class="detail-section">
       <div class="detail-section-title">Basic Info</div>
       ${role.confidential && role.confidential.company ? `
@@ -1136,10 +2339,7 @@ function openRoleDetail(roleId) {
       <div class="detail-field">
         <div class="detail-field-label">Company</div>
         <input type="text" id="detail-company-input" class="form-input" value="${escapeHtml(role.company || '')}" placeholder="Company name" ${role.confidential && role.confidential.company ? 'readonly disabled' : ''}>
-        <div id="detail-company-enrich" style="margin-top: var(--space-2);">
-          <button id="detail-enrich-btn" class="btn btn-secondary" style="font-size: 0.8rem; padding: 4px 10px;">🔍 Enrich Company</button>
-          <div id="detail-company-profile" style="display: none; margin-top: var(--space-2); padding: var(--space-3); background: var(--bg-base); border-radius: var(--radius-md); border: 1px solid var(--bg-subtle); font-size: 0.85rem;"></div>
-        </div>
+        <div id="detail-company-profile" style="display: none; margin-top: var(--space-2); padding: var(--space-3); background: var(--bg-base); border-radius: var(--radius-md); border: 1px solid var(--bg-subtle); font-size: 0.85rem;"></div>
       </div>
       <div class="detail-field">
         <div class="detail-field-label">Role Title</div>
@@ -1149,48 +2349,28 @@ function openRoleDetail(roleId) {
         <div class="detail-field-label">Location</div>
         <input type="text" id="detail-location-input" class="form-input" value="${escapeHtml(role.location || '')}" placeholder="e.g., San Francisco, CA / Remote">
       </div>
-    </div>`;
-
-  bodyHtml += `
-    <div class="detail-section">
-      <div class="detail-section-title">Classification</div>
-      <div class="detail-field">
-        <div class="detail-field-label">Tier</div>
-        <select id="detail-tier-input" class="form-select">
-          <option value="hot" ${role.tier === 'hot' ? 'selected' : ''}>Hot</option>
-          <option value="active" ${role.tier === 'active' ? 'selected' : ''}>Active</option>
-          <option value="watching" ${role.tier === 'watching' ? 'selected' : ''}>Watching</option>
-          <option value="dormant" ${role.tier === 'dormant' ? 'selected' : ''}>Dormant</option>
-        </select>
-      </div>
-      <div class="detail-field">
-        <div class="detail-field-label">Stage</div>
-        <select id="detail-stage-input" class="form-select">
-          ${STAGES.map(s => `<option value="${s}" ${role.stage === s ? 'selected' : ''}>${s.charAt(0).toUpperCase() + s.slice(1)}</option>`).join('')}
-        </select>
-      </div>
-      <div class="detail-field" id="substage-field" style="${typeof getSubstages === 'function' && getSubstages(role.stage).length > 0 ? '' : 'display: none;'}">
-        <div class="detail-field-label">Substage</div>
-        <select id="detail-substage-input" class="form-select">
-          <option value="">— None —</option>
-          ${typeof getSubstages === 'function' ? getSubstages(role.stage).map(s => `<option value="${s}" ${role.substage === s ? 'selected' : ''}>${s}</option>`).join('') : ''}
-        </select>
-      </div>
-      <div class="detail-field">
-        <div class="detail-field-label">Positioning</div>
-        <select id="detail-positioning-input" class="form-select">
-          <option value="ic" ${role.positioning === 'ic' ? 'selected' : ''}>Individual Contributor</option>
-          <option value="management" ${role.positioning === 'management' ? 'selected' : ''}>Management</option>
-        </select>
-      </div>
       <div class="detail-field">
         <div class="detail-field-label">Source</div>
         <input type="text" id="detail-source-input" class="form-input" value="${escapeHtml(role.source || '')}" placeholder="e.g., LinkedIn, Referral, Job Board">
       </div>
+      <div class="detail-field">
+        <div class="detail-field-label">Job Posting URL</div>
+        <div style="display: flex; gap: var(--space-2); align-items: center;">
+          <input type="text" id="detail-url-input" class="form-input" value="${escapeHtml(role.url || '')}" placeholder="https://..." style="flex: 1;">
+          ${role.url ? `<a href="${role.url}" target="_blank" rel="noopener noreferrer" title="Open job posting" style="color: var(--accent); text-decoration: none; font-size: 1rem; cursor: pointer;">🔗</a>` : ''}
+        </div>
+      </div>
     </div>
 
+    <!-- ===== 2. FIT ASSESSMENT ===== -->
+    ${renderFitAssessmentSection(role)}
+
+    <!-- ===== 2b. OUTREACH ===== -->
+    ${renderOutreachSection(role)}
+
+    <!-- ===== 3. SCORE & COMPENSATION (merged) ===== -->
     <div class="detail-section">
-      <div class="detail-section-title">Metrics</div>
+      <div class="detail-section-title">Score & Compensation</div>
       <div class="detail-field">
         <div class="detail-field-label">Score (0-100)</div>
         <input type="number" id="detail-score-input" class="form-input" min="0" max="100" value="${role.score || (role.scoring ? computeWeightedScore(role.scoring) : '')}" placeholder="Score">
@@ -1207,20 +2387,12 @@ function openRoleDetail(roleId) {
       </div>
       ` : ''}
       <div class="detail-field">
-        <div class="detail-field-label">Days in Stage</div>
-        <div class="detail-field-value">${getDaysInStage(role)} days</div>
-      </div>
-    </div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">Compensation</div>
-      <div class="detail-field">
         <div class="detail-field-label">Salary / Comp Range</div>
-        <input type="text" id="detail-salary-input" class="form-input" value="${escapeHtml(role.salary || '')}" placeholder="e.g., $150,000 - $200,000">
+        <input type="text" id="detail-salary-input" class="form-input" value="${escapeHtml(autoSalary)}" placeholder="e.g., $150,000 - $200,000">
       </div>
       ${(() => {
         if (typeof parseSalaryAndEstimate !== 'function') return '';
-        const salaryText = role.salary || (role.compensation && role.compensation.raw) || '';
+        const salaryText = autoSalary || '';
         if (!salaryText) return '';
         const companyStage = role.stage || '';
         const estimate = parseSalaryAndEstimate(salaryText, companyStage, role.title || '', role.jd || '');
@@ -1229,54 +2401,35 @@ function openRoleDetail(roleId) {
         return '<div style="font-size: 0.8rem; color: var(--text-tertiary); padding: 4px 0 0 2px;">Est. total comp: <span style="color: var(--success); font-weight: 600;">' + fmtK(estimate.estLow) + ' – ' + fmtK(estimate.estHigh) + '</span> · ' + estimate.confidence.label + '</div>';
       })()}
       <div class="detail-field">
-        <div class="detail-field-label">URL / Job Posting Link</div>
-        <div style="display: flex; gap: var(--space-2); align-items: center;">
-          <input type="text" id="detail-url-input" class="form-input" value="${escapeHtml(role.url || '')}" placeholder="https://..." style="flex: 1;">
-          ${role.url ? `<a href="${role.url}" target="_blank" rel="noopener noreferrer" title="Open job posting" style="color: var(--accent); text-decoration: none; font-size: 1rem; cursor: pointer;">🔗</a>` : ''}
-        </div>
+        <div class="detail-field-label">Days in Stage</div>
+        <div class="detail-field-value">${getDaysInStage(role)} days</div>
       </div>
     </div>
 
-    ${role.closeReason ? `
+    <!-- ===== 4. CONNECTIONS (moved up — high-value for networking) ===== -->
     <div class="detail-section">
-      <div class="detail-section-title">Close Info</div>
+      <div class="detail-section-title">Connections</div>
+      <div id="detail-connections-container" style="display: flex; flex-direction: column; gap: var(--space-2);">
+        <!-- Connections will be rendered here -->
+      </div>
+    </div>
+
+    <!-- ===== 5. JOB DESCRIPTION ===== -->
+    <div class="detail-section">
+      <div class="detail-section-title">Job Description</div>
+
+      <!-- Fetch JD from URL form -->
+      <div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-3);">
+        <input type="url" id="detail-fetch-jd-url" placeholder="Paste job posting URL to fetch JD..." style="flex: 1; padding: var(--space-2) var(--space-3); border: 1px solid var(--bg-subtle); border-radius: var(--radius-sm); background: var(--bg-base); color: var(--text-primary); font-size: 0.9rem;">
+        <button id="detail-fetch-jd-btn" class="btn btn-secondary" style="font-size: 0.9rem; white-space: nowrap;" aria-label="Fetch job description from URL">🔗 Fetch</button>
+      </div>
+
       <div class="detail-field">
-        <div class="detail-field-label">Close Reason</div>
-        <div class="detail-field-value">${escapeHtml(role.closeReason)}</div>
-      </div>
-      ${role.closeNotes ? `<div class="detail-field">
-        <div class="detail-field-label">Notes</div>
-        <div class="detail-field-value">${escapeHtml(role.closeNotes)}</div>
-      </div>` : ''}
-      ${role.closedAt ? `<div class="detail-field">
-        <div class="detail-field-label">Closed On</div>
-        <div class="detail-field-value">${new Date(role.closedAt).toLocaleDateString()}</div>
-      </div>` : ''}
-    </div>
-    ` : ''}
-
-    ${role.stageHistory && role.stageHistory.length > 0 ? `
-    <div class="detail-section">
-      <div class="detail-section-title">Stage History</div>
-      <div class="stage-history-timeline">
-        ${role.stageHistory.map((entry, idx) => `
-          <div class="stage-history-entry" style="${idx < role.stageHistory.length - 1 ? 'margin-bottom: var(--space-4);' : ''}">
-            <div style="display: flex; align-items: center; gap: var(--space-2);">
-              <span class="stage-history-dot"></span>
-              <div style="flex: 1;">
-                <div style="font-weight: 600; color: var(--text-primary);">${escapeHtml(entry.stage.charAt(0).toUpperCase() + entry.stage.slice(1))}</div>
-                <div style="font-size: 0.8rem; color: var(--text-tertiary);">
-                  ${typeof formatRelativeTime === 'function' ? formatRelativeTime(entry.timestamp) : new Date(entry.timestamp).toLocaleDateString()}
-                  ${idx < role.stageHistory.length - 1 ? `<span style="margin-left: var(--space-2);">(${Math.floor((role.stageHistory[idx + 1].timestamp - entry.timestamp) / (1000 * 60 * 60 * 24))} days)</span>` : '(current)'}
-                </div>
-              </div>
-            </div>
-          </div>
-        `).join('')}
+        <textarea id="detail-jd-input" class="form-textarea" placeholder="Job description">${escapeHtml(role.jd || '')}</textarea>
       </div>
     </div>
-    ` : ''}
 
+    <!-- ===== 6. COMMUNICATIONS LOG ===== -->
     <div class="detail-section">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-2);">
         <div class="detail-section-title" style="margin-bottom: 0;">Communications Log</div>
@@ -1314,29 +2467,7 @@ function openRoleDetail(roleId) {
       </div>
     </div>
 
-    <!-- Resumes Sent section removed — resumes are now managed as artifacts -->
-
-    <div class="detail-section">
-      <div class="detail-section-title">Connections</div>
-      <div id="detail-connections-container" style="display: flex; flex-direction: column; gap: var(--space-2);">
-        <!-- Connections will be rendered here -->
-      </div>
-    </div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">Description</div>
-
-      <!-- Fetch JD from URL form -->
-      <div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-3);">
-        <input type="url" id="detail-fetch-jd-url" placeholder="Paste job posting URL..." style="flex: 1; padding: var(--space-2) var(--space-3); border: 1px solid var(--bg-subtle); border-radius: var(--radius-sm); background: var(--bg-base); color: var(--text-primary); font-size: 0.9rem;">
-        <button id="detail-fetch-jd-btn" class="btn btn-secondary" style="font-size: 0.9rem; white-space: nowrap;" aria-label="Fetch job description from URL">🔗 Fetch</button>
-      </div>
-
-      <div class="detail-field">
-        <textarea id="detail-jd-input" class="form-textarea" placeholder="Job description">${escapeHtml(role.jd || '')}</textarea>
-      </div>
-    </div>
-
+    <!-- ===== 7. ARTIFACTS & NOTES ===== -->
     <div class="detail-section">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-2);">
         <div class="detail-section-title" style="margin-bottom: 0;">Artifacts</div>
@@ -1363,6 +2494,82 @@ function openRoleDetail(roleId) {
         <textarea id="detail-notes-input" class="form-textarea" placeholder="Add notes..." style="min-height: 80px;">${escapeHtml(role.notes || '')}</textarea>
       </div>
     </div>
+
+    <!-- ===== 8. CLASSIFICATION (moved down — set once, rarely changed) ===== -->
+    <div class="detail-section">
+      <div class="detail-section-title">Classification</div>
+      <div class="detail-field">
+        <div class="detail-field-label">Tier</div>
+        <select id="detail-tier-input" class="form-select">
+          <option value="hot" ${role.tier === 'hot' ? 'selected' : ''}>Hot</option>
+          <option value="active" ${role.tier === 'active' ? 'selected' : ''}>Active</option>
+          <option value="watching" ${role.tier === 'watching' ? 'selected' : ''}>Watching</option>
+          <option value="dormant" ${role.tier === 'dormant' ? 'selected' : ''}>Dormant</option>
+        </select>
+      </div>
+      <div class="detail-field">
+        <div class="detail-field-label">Stage</div>
+        <select id="detail-stage-input" class="form-select">
+          ${STAGES.map(s => `<option value="${s}" ${role.stage === s ? 'selected' : ''}>${s.charAt(0).toUpperCase() + s.slice(1)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="detail-field" id="substage-field" style="${typeof getSubstages === 'function' && getSubstages(role.stage).length > 0 ? '' : 'display: none;'}">
+        <div class="detail-field-label">Substage</div>
+        <select id="detail-substage-input" class="form-select">
+          <option value="">— None —</option>
+          ${typeof getSubstages === 'function' ? getSubstages(role.stage).map(s => `<option value="${s}" ${role.substage === s ? 'selected' : ''}>${s}</option>`).join('') : ''}
+        </select>
+      </div>
+      <div class="detail-field">
+        <div class="detail-field-label">Positioning</div>
+        <select id="detail-positioning-input" class="form-select">
+          <option value="ic" ${role.positioning === 'ic' ? 'selected' : ''}>Individual Contributor</option>
+          <option value="management" ${role.positioning === 'management' ? 'selected' : ''}>Management</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- ===== 9. CLOSE INFO (conditional) ===== -->
+    ${role.closeReason ? `
+    <div class="detail-section">
+      <div class="detail-section-title">Close Info</div>
+      <div class="detail-field">
+        <div class="detail-field-label">Close Reason</div>
+        <div class="detail-field-value">${escapeHtml(role.closeReason)}</div>
+      </div>
+      ${role.closeNotes ? `<div class="detail-field">
+        <div class="detail-field-label">Notes</div>
+        <div class="detail-field-value">${escapeHtml(role.closeNotes)}</div>
+      </div>` : ''}
+      ${role.closedAt ? `<div class="detail-field">
+        <div class="detail-field-label">Closed On</div>
+        <div class="detail-field-value">${new Date(role.closedAt).toLocaleDateString()}</div>
+      </div>` : ''}
+    </div>
+    ` : ''}
+
+    <!-- ===== 10. STAGE HISTORY (conditional) ===== -->
+    ${role.stageHistory && role.stageHistory.length > 0 ? `
+    <div class="detail-section">
+      <div class="detail-section-title">Stage History</div>
+      <div class="stage-history-timeline">
+        ${role.stageHistory.map((entry, idx) => `
+          <div class="stage-history-entry" style="${idx < role.stageHistory.length - 1 ? 'margin-bottom: var(--space-4);' : ''}">
+            <div style="display: flex; align-items: center; gap: var(--space-2);">
+              <span class="stage-history-dot"></span>
+              <div style="flex: 1;">
+                <div style="font-weight: 600; color: var(--text-primary);">${escapeHtml(entry.stage.charAt(0).toUpperCase() + entry.stage.slice(1))}</div>
+                <div style="font-size: 0.8rem; color: var(--text-tertiary);">
+                  ${typeof formatRelativeTime === 'function' ? formatRelativeTime(entry.timestamp) : new Date(entry.timestamp).toLocaleDateString()}
+                  ${idx < role.stageHistory.length - 1 ? `<span style="margin-left: var(--space-2);">(${Math.floor((role.stageHistory[idx + 1].timestamp - entry.timestamp) / (1000 * 60 * 60 * 24))} days)</span>` : '(current)'}
+                </div>
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    ` : ''}
   `;
 
   body.innerHTML = bodyHtml;
@@ -1395,12 +2602,7 @@ function openRoleDetail(roleId) {
 
   overlay.onclick = closeRoleDetail;
 
-  // Wire up Enrich Company button
-  const enrichBtn = document.getElementById('detail-enrich-btn');
-  if (enrichBtn) {
-    enrichBtn.onclick = () => enrichCompanyProfile(roleId);
-  }
-  // Show existing company profile data if available
+  // Show existing company profile data if available (enrichment happens automatically in pipeline)
   showExistingCompanyProfile(role.company);
 
   // Add debounced JD input listener for real-time metadata detection
@@ -1504,6 +2706,58 @@ function openRoleDetail(roleId) {
 
   // Render connections
   renderRoleConnections(role);
+
+  // Async: load resume status for this role
+  checkResumeStatus(role.id).then(resumes => {
+    const container = document.getElementById('resume-status-container');
+    if (container && resumes) {
+      container.innerHTML = renderResumeStatus(resumes);
+
+      // If there's a pending request, poll for updates
+      const hasPending = resumes.some(r => r.status === 'pending' || r.status === 'generating');
+      if (hasPending) {
+        const pollInterval = setInterval(async () => {
+          if (!editingRoleId || editingRoleId !== role.id) {
+            clearInterval(pollInterval);
+            return;
+          }
+          const updated = await checkResumeStatus(role.id);
+          if (updated) {
+            const stillPending = updated.some(r => r.status === 'pending' || r.status === 'generating');
+            const cont = document.getElementById('resume-status-container');
+            if (cont) cont.innerHTML = renderResumeStatus(updated);
+            if (!stillPending) clearInterval(pollInterval);
+          }
+        }, 10000); // Poll every 10s
+      }
+    }
+  });
+
+  // Async: load outreach drafts for this role
+  checkOutreachStatus(role.id).then(drafts => {
+    const container = document.getElementById('outreach-drafts-container');
+    if (container && drafts) {
+      container.innerHTML = renderOutreachDrafts(drafts);
+
+      // If there's a pending request, poll for updates
+      const hasPending = drafts.some(d => d.status === 'pending' || d.status === 'generating');
+      if (hasPending) {
+        const pollInterval = setInterval(async () => {
+          if (!editingRoleId || editingRoleId !== role.id) {
+            clearInterval(pollInterval);
+            return;
+          }
+          const updated = await checkOutreachStatus(role.id);
+          if (updated) {
+            const stillPending = updated.some(d => d.status === 'pending' || d.status === 'generating');
+            const cont = document.getElementById('outreach-drafts-container');
+            if (cont) cont.innerHTML = renderOutreachDrafts(updated);
+            if (!stillPending) clearInterval(pollInterval);
+          }
+        }, 10000); // Poll every 10s
+      }
+    }
+  });
 }
 
 /**
@@ -2220,6 +3474,10 @@ function openAddConnectionModal(company) {
         </select>
       </div>
       <div>
+        <label style="display: block; font-size: 0.9rem; font-weight: 500; color: var(--text-primary); margin-bottom: var(--space-1);">LinkedIn URL</label>
+        <input type="url" id="form-connection-linkedin" class="form-input" placeholder="https://www.linkedin.com/in/..." style="width: 100%;">
+      </div>
+      <div>
         <label style="display: block; font-size: 0.9rem; font-weight: 500; color: var(--text-primary); margin-bottom: var(--space-1);">Source</label>
         <input type="text" id="form-connection-source" class="form-input" placeholder="e.g., LinkedIn, Referral" value="Manual" style="width: 100%;">
       </div>
@@ -2250,6 +3508,7 @@ function submitAddConnection() {
   const title = document.getElementById('form-connection-title').value.trim();
   const company = document.getElementById('form-connection-company').value.trim();
   const relationship = document.getElementById('form-connection-relationship').value.trim();
+  const linkedinUrl = document.getElementById('form-connection-linkedin').value.trim();
   const source = document.getElementById('form-connection-source').value.trim();
   const notes = document.getElementById('form-connection-notes').value.trim();
 
@@ -2271,17 +3530,15 @@ function submitAddConnection() {
     title,
     company,
     relationship,
+    linkedinUrl,
     source,
     notes
   });
 
   if (connection) {
     showToast('Connection added successfully', 'success');
-    // Close modal and refresh connections display
-    const modal = document.querySelector('[role="dialog"]');
-    if (modal) {
-      modal.style.display = 'none';
-    }
+    // Close modal overlay (not the detail panel)
+    closeModal();
     // Re-render connections if detail panel is open
     if (editingRoleId) {
       const roles = getRoles();
@@ -2301,7 +3558,7 @@ function closeRoleDetail() {
   document.getElementById('detail-overlay').classList.remove('active');
 }
 
-function saveRoleDetail() {
+async function saveRoleDetail() {
   if (!editingRoleId) return;
 
   const roles = getRoles();
@@ -2319,7 +3576,15 @@ function saveRoleDetail() {
   role.location = document.getElementById('detail-location-input').value;
   role.tier = document.getElementById('detail-tier-input').value;
   const oldStage = role.stage;
-  role.stage = document.getElementById('detail-stage-input').value;
+  const newStage = document.getElementById('detail-stage-input').value;
+
+  // Stage transition validation
+  if (newStage !== oldStage) {
+    const allowed = await validateStageTransition(role, newStage);
+    if (!allowed) return;
+  }
+
+  role.stage = newStage;
   role.substage = document.getElementById('detail-substage-input')?.value || '';
   role.positioning = document.getElementById('detail-positioning-input').value;
 
@@ -2341,35 +3606,47 @@ function saveRoleDetail() {
   }
   role.lastActivity = Date.now();
 
-  // Auto-extract metadata from JD if it's changed and new fields are empty
-  if (newJd && newJd !== oldJd && typeof processJD === 'function') {
+  // Auto-extract metadata from JD — runs when JD changed OR when salary/location are still empty
+  if (newJd && typeof processJD === 'function') {
+    const jdChanged = newJd !== oldJd;
     const extracted = processJD(newJd);
     const toastItems = [];
 
-    // Auto-fill salary if empty
+    // Auto-fill salary if empty (regardless of whether JD changed)
     if (extracted.salary && !role.salary) {
       role.salary = extracted.salary;
-      document.getElementById('detail-salary-input').value = extracted.salary;
+      role.compensation = role.compensation || {};
+      role.compensation.raw = extracted.salary;
+      const salaryInput = document.getElementById('detail-salary-input');
+      if (salaryInput) salaryInput.value = extracted.salary;
       toastItems.push('salary');
     }
 
     // Auto-fill location if empty
     if (extracted.location && !role.location) {
       role.location = extracted.location;
-      document.getElementById('detail-location-input').value = extracted.location;
+      const locInput = document.getElementById('detail-location-input');
+      if (locInput) locInput.value = extracted.location;
       toastItems.push('location');
     }
 
     // Show toast with extracted items
-    if (toastItems.length > 0 || extracted.keywords.length > 0) {
+    if (toastItems.length > 0 || (jdChanged && extracted.keywords.length > 0)) {
       const extractedInfo = [];
       if (toastItems.length > 0) {
         extractedInfo.push(toastItems.join(', '));
       }
-      if (extracted.keywords.length > 0) {
+      if (jdChanged && extracted.keywords.length > 0) {
         extractedInfo.push(`${extracted.keywords.length} keywords`);
       }
       showToast(`Auto-extracted: ${extractedInfo.join(', ')}`, 'success');
+    }
+  }
+
+  // Auto-score if JD is present but role has no scoring data, or JD changed
+  if (role.jd && role.jd.length >= 100 && (!role.scoring || (newJd !== oldJd))) {
+    if (scoreRoleWithEngine(role)) {
+      showToast(`Auto-scored: ${role.score}/100`, 'success');
     }
   }
 
@@ -2404,7 +3681,7 @@ function showExistingCompanyProfile(companyName) {
         fields.push(`<div><span style="color: var(--text-tertiary);">Stage:</span> ${escapeHtml(company.stage)}</div>`);
       } else {
         // Stage is missing or "Unknown" — show hint
-        fields.push(`<div style="color: var(--text-tertiary); font-size: 0.8rem; padding: 4px 8px; background: var(--bg-subtle); border-radius: var(--radius-sm);">📌 Stage: Unknown — click Enrich to detect</div>`);
+        fields.push(`<div style="color: var(--text-tertiary); font-size: 0.8rem; padding: 4px 8px; background: var(--bg-subtle); border-radius: var(--radius-sm);">📌 Stage: Unknown</div>`);
       }
       if (company.description) fields.push(`<div style="margin-top: var(--space-1); color: var(--text-secondary);">${escapeHtml(company.description.substring(0, 200))}${company.description.length > 200 ? '...' : ''}</div>`);
       if (company.mission) fields.push(`<div style="margin-top: var(--space-1); font-style: italic; color: var(--text-tertiary);">"${escapeHtml(company.mission.substring(0, 150))}"</div>`);
@@ -2416,9 +3693,8 @@ function showExistingCompanyProfile(companyName) {
       }
     } else if (company && (!company.stage || company.stage === 'Unknown')) {
       // Company exists but has no enrichment data; show stage unknown hint
-      profileDiv.innerHTML = `<div style="color: var(--text-tertiary); font-size: 0.8rem; padding: 4px 8px; background: var(--bg-subtle); border-radius: var(--radius-sm);">📌 Stage: Unknown — click Enrich to detect</div>`;
+      profileDiv.innerHTML = `<div style="color: var(--text-tertiary); font-size: 0.8rem; padding: 4px 8px; background: var(--bg-subtle); border-radius: var(--radius-sm);">📌 Stage: Unknown</div>`;
       profileDiv.style.display = '';
-      if (enrichBtn) enrichBtn.textContent = '🔍 Enrich Company';
     }
   } catch (e) {
     console.error('[Show Company Profile Error]', e);
@@ -2757,6 +4033,11 @@ function submitAddRole() {
     role.compensation = { raw: salary };
   }
 
+  // Auto-score with the score engine if JD is available
+  if (jd && jd.length >= 100) {
+    scoreRoleWithEngine(role);
+  }
+
   // Add confidential fields if applicable
   if (isConfidential) {
     role.confidential = confidential;
@@ -2855,6 +4136,9 @@ function exportToCSV() {
 // ================================================================
 
 function render() {
+  // Re-detect stale roles on each render (data may have changed)
+  detectStaleRoles();
+
   if (currentViewMode === VIEW_MODES.KANBAN) {
     renderKanban();
   } else if (currentViewMode === VIEW_MODES.TABLE) {
@@ -3088,8 +4372,14 @@ async function init() {
     // Set up cross-tab sync
     setupCrossTabSync();
 
+    // Detect stale roles before first render
+    detectStaleRoles();
+
     // Initial render
     render();
+
+    // Render batch operations dropdown in toolbar
+    renderBatchDropdown();
 
     console.log('[Pipeline] Initialized successfully');
   } catch (error) {

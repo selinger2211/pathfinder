@@ -238,20 +238,30 @@ function cleanSalaryDecimals(s) {
 function extractSalaryFromJD(jdText) {
   if (!jdText || jdText.length < 100) return null;
 
-  // Pattern 1: "base salary range...is $X - $Y"
-  const baseSalaryPattern = /(?:base\s+salary|salary\s+range|pay\s+range|base\s+pay|compensation\s+range|base\s+compensation)[^$]*?(\$[\d,]+(?:\.\d+)?k?\s*[-–—]\s*\$?[\d,]+(?:\.\d+)?k?)/i;
-  const baseMatch = jdText.match(baseSalaryPattern);
-  if (baseMatch) return cleanSalaryDecimals(baseMatch[1].trim());
+  // Normalize the text: collapse whitespace around $ signs and salary patterns
+  // This handles "$ 243,000" and "USD$162,500" and "$182,700.00/yr"
+  const normalized = jdText
+    .replace(/USD\$/gi, '$')         // USD$162,500 → $162,500
+    .replace(/\$\s+/g, '$');          // $ 243,000 → $243,000
 
-  // Pattern 2: "typical...range...is $X - $Y"
-  const typicalPattern = /typical[^$]*?(\$[\d,]+(?:\.\d+)?k?\s*[-–—]\s*\$?[\d,]+(?:\.\d+)?k?)\s*(?:annually|per year|\/year)?/i;
-  const typicalMatch = jdText.match(typicalPattern);
-  if (typicalMatch) return cleanSalaryDecimals(typicalMatch[1].trim());
+  // Universal salary range pattern: matches all common formats
+  // Handles: $182,700.00/yr - $274,000.00/yr | $260K - $288K | $243,000-328,500
+  const salaryRangePattern = /\$[\d,]+(?:\.\d+)?k?(?:\/yr)?\s*[-–—]\s*\$?[\d,]+(?:\.\d+)?k?(?:\/yr)?/gi;
 
-  // Pattern 3: Standalone "$X,000 - $Y,000" near salary context words
-  const contextPattern = /(?:salary|compensation|pay|annual|base)[^$]{0,80}(\$\d{2,3},\d{3}(?:\.\d+)?\s*[-–—]\s*\$?\d{2,3},\d{3}(?:\.\d+)?)/i;
-  const contextMatch = jdText.match(contextPattern);
-  if (contextMatch) return cleanSalaryDecimals(contextMatch[1].trim());
+  // Find all salary-like ranges in the text
+  const allMatches = normalized.match(salaryRangePattern);
+  if (!allMatches) return null;
+
+  // Filter to likely annual salaries (min value >= $50,000 or >= $50K)
+  for (const match of allMatches) {
+    const minVal = match.match(/\$([\d,]+)/);
+    if (!minVal) continue;
+    const numericMin = parseInt(minVal[1].replace(/,/g, ''));
+    // Skip hourly/small amounts: require min >= 40000 (annual) or K format
+    if (numericMin >= 40000 || /k/i.test(match)) {
+      return cleanSalaryDecimals(match.replace(/\/yr/gi, '').trim());
+    }
+  }
 
   return null;
 }

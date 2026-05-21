@@ -22,6 +22,7 @@ LOG_DIR="$PROJECT_ROOT/.logs"
 
 HTTP_PORT=3000
 MCP_ARTIFACTS_PORT=3847
+PHOENIX_PORT=6006
 
 # Colors
 RED='\033[0;31m'
@@ -196,6 +197,18 @@ start_all() {
     echo -e "    ${BLUE}http://localhost:$MCP_ARTIFACTS_PORT${NC}"
     echo ""
   fi
+  # Check if Phoenix (Docker) is running
+  local phoenix_status=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PHOENIX_PORT/" 2>/dev/null)
+  if [ "$phoenix_status" = "200" ] || [ "$phoenix_status" = "307" ]; then
+    echo -e "  ${GREEN}Phoenix Observability:${NC}"
+    echo -e "    ${BLUE}http://localhost:$PHOENIX_PORT${NC}"
+    echo ""
+  else
+    echo -e "  ${YELLOW}Phoenix Observability:${NC} not running"
+    echo -e "    Start with: ${YELLOW}docker compose up -d${NC}"
+    echo ""
+  fi
+
   echo -e "  ${GREEN}Commands:${NC}"
   echo -e "    ${YELLOW}./start.sh stop${NC}     — Stop all services"
   echo -e "    ${YELLOW}./start.sh status${NC}   — Check service status"
@@ -264,6 +277,14 @@ status_all() {
     fi
   else
     echo -e "  MCP Server (port $MCP_ARTIFACTS_PORT):  ${RED}○ stopped${NC}"
+  fi
+
+  # Phoenix (Docker-managed, not PID-tracked)
+  local phoenix_health=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PHOENIX_PORT/" 2>/dev/null)
+  if [ "$phoenix_health" = "200" ] || [ "$phoenix_health" = "307" ]; then
+    echo -e "  Phoenix (port $PHOENIX_PORT):            ${GREEN}● running${NC} (Docker)"
+  else
+    echo -e "  Phoenix (port $PHOENIX_PORT):            ${RED}○ stopped${NC} (docker compose up -d)"
   fi
 
   local data_count=$(ls "$HOME/.pathfinder/data/" 2>/dev/null | wc -l | tr -d ' ')

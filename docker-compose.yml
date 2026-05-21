@@ -1,0 +1,40 @@
+# ================================================================
+# Pathfinder — Phoenix Observability Stack
+# ================================================================
+# Arize Phoenix provides trace visualization and analysis for
+# Pathfinder's scoring engine, resume generator, and server routes.
+#
+# Usage:
+#   docker compose up -d          Start Phoenix
+#   docker compose down           Stop Phoenix
+#   docker compose logs -f        View logs
+#
+# Phoenix UI: http://localhost:6006
+# OTLP endpoint: http://localhost:6006/v1/traces (gRPC + HTTP)
+#
+# The Node.js server sends traces via @arizeai/phoenix-otel.
+# If Phoenix is down, traces are silently dropped — zero app impact.
+# ================================================================
+
+services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: pathfinder-phoenix
+    ports:
+      - "6006:6006"    # Phoenix UI + OTLP collector
+      - "4317:4317"    # gRPC OTLP (optional, for other clients)
+    environment:
+      - PHOENIX_WORKING_DIR=/data
+    volumes:
+      - phoenix-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6006/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  phoenix-data:
+    driver: local

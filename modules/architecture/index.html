@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pathfinder — Agent Architecture</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text: #1a1a2e;
+      --text-secondary: #6b7280;
+      --border: #e5e7eb;
+      --blue: #3b82f6;
+      --green: #22c55e;
+      --amber: #f59e0b;
+      --indigo: #6366f1;
+      --rose: #e91e63;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+
+    .header h1 {
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    .header .version {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--blue);
+      background: #dbeafe;
+      padding: 3px 10px;
+      border-radius: 99px;
+    }
+
+    .back-link {
+      font-size: 13px;
+      color: var(--blue);
+      text-decoration: none;
+      margin-bottom: 16px;
+      display: inline-block;
+    }
+
+    .back-link:hover { text-decoration: underline; }
+
+    .diagram-container {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px;
+      margin-bottom: 32px;
+    }
+
+    .agent-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+
+    .agent-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      border-left: 4px solid;
+    }
+
+    .agent-card h3 {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .agent-card .trigger {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-bottom: 10px;
+    }
+
+    .agent-card .detail {
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    .agent-card .io {
+      margin-top: 10px;
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .agent-card .io span {
+      display: inline-block;
+      background: #f3f4f6;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin: 2px 4px 2px 0;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 10px;
+    }
+
+    .data-flow {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+
+    .data-flow h2 {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+
+    .flow-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .flow-table th {
+      text-align: left;
+      font-weight: 600;
+      padding: 8px 12px;
+      border-bottom: 2px solid var(--border);
+      color: var(--text-secondary);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .flow-table td {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .flow-table code {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 11px;
+      background: #f3f4f6;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+  </style>
+</head>
+<body>
+  <a href="../dashboard/" class="back-link">← Back to Dashboard</a>
+
+  <div class="header">
+    <h1>Agent Architecture</h1>
+    <span class="version">v4.0.0</span>
+  </div>
+
+  <!-- Mermaid Diagram -->
+  <div class="diagram-container">
+    <pre class="mermaid">
+flowchart TD
+    subgraph Sources["📨 Email Sources"]
+        LI["LinkedIn Alerts<br/><small>jobs-noreply · jobalerts-noreply</small>"]
+        JR["Jobright Alerts<br/><small>noreply@jobright.ai</small>"]
+        PREFS["User Preferences<br/><small>Titles, domains, comp, location</small>"]
+    end
+
+    subgraph FeedScout["🔍 Feed Scout"]
+        direction TB
+        SCAN["Scan Gmail MCP"] --> PARSE["Parse Emails<br/><small>LinkedIn parser · Jobright parser</small>"]
+        PARSE --> DEDUP["Cross-Source Dedup"]
+        DEDUP --> SCORE["Score<br/><small>7 dimensions · networkFit 30%</small>"]
+    end
+
+    LI --> SCAN
+    JR --> SCAN
+    PREFS --> SCORE
+
+    SCORE --> QUEUE[("pf_feed_queue.json<br/><small>Scored feed items</small>")]
+
+    QUEUE --> ORCH
+
+    subgraph ORCH["🎯 Pipeline Orchestrator"]
+        direction TB
+        APPROVE["Approve to Pipeline"] --> STAGE["Stage Management<br/><small>Stale detection · Validation</small>"]
+        STAGE --> BATCH["Batch Ops<br/><small>Score all · Generate all</small>"]
+    end
+
+    ORCH --> ROLES[("pf_roles.json<br/><small>Pipeline roles</small>")]
+
+    ROLES -->|"Move to Applying"| RESUME
+    ROLES -->|"Draft Outreach"| OUTREACH
+
+    subgraph RESUME["📄 Resume Tailor"]
+        direction TB
+        RQUEUE["Poll resume-requests/"] --> RGEN["Generate DOCX<br/><small>SKILL.md · Bullet bank · Honesty rules</small>"]
+        RGEN --> RPDF["Convert to PDF<br/><small>LibreOffice headless</small>"]
+    end
+
+    subgraph OUTREACH["✉️ Outreach Drafter"]
+        direction TB
+        OQUEUE["Poll outreach-requests/"] --> OGEN["Generate Message<br/><small>5 templates · Real proof points</small>"]
+        OGEN --> OLIMIT["Validate Limits<br/><small>300 char LinkedIn · 1900 InMail</small>"]
+    end
+
+    RESUME --> PDFS[("generated-resumes/<br/><small>Tailored PDFs</small>")]
+    OUTREACH --> DRAFTS[("outreach-requests/<br/><small>Completed drafts</small>")]
+
+    HEALTH["🩺 Health Monitor<br/><small>Every 30 min</small>"]
+    HEALTH -.->|monitors| FeedScout
+    HEALTH -.->|monitors| ORCH
+    HEALTH -.->|monitors| RESUME
+    HEALTH -.->|monitors| OUTREACH
+    HEALTH --> REPORT[("pf_health_report.json")]
+
+    classDef source fill:#f3f4f6,stroke:#d1d5db,color:#1a1a2e
+    classDef scout fill:#dbeafe,stroke:#3b82f6,color:#1a1a2e
+    classDef orch fill:#fef3c7,stroke:#f59e0b,color:#1a1a2e
+    classDef resume fill:#dcfce7,stroke:#22c55e,color:#1a1a2e
+    classDef outreach fill:#e0e7ff,stroke:#6366f1,color:#1a1a2e
+    classDef health fill:#fce4ec,stroke:#e91e63,color:#1a1a2e
+    classDef data fill:#f9fafb,stroke:#d1d5db,color:#6b7280,stroke-dasharray: 4 2
+
+    class LI,JR,PREFS source
+    class SCAN,PARSE,DEDUP,SCORE scout
+    class APPROVE,STAGE,BATCH orch
+    class RQUEUE,RGEN,RPDF resume
+    class OQUEUE,OGEN,OLIMIT outreach
+    class HEALTH health
+    class QUEUE,ROLES,PDFS,DRAFTS,REPORT data
+    </pre>
+  </div>
+
+  <!-- Agent Cards -->
+  <div class="agent-grid">
+    <div class="agent-card" style="border-left-color: var(--blue);">
+      <h3>🔍 Feed Scout</h3>
+      <div class="trigger">Scheduled: 2x daily (8am + 6pm) · Manual: "Scan Now"</div>
+      <div class="detail">Scans Gmail for LinkedIn and Jobright job alerts. Parses structured data, deduplicates across sources, and scores using the 7-dimension engine (networkFit weighted at 30%).</div>
+      <div class="io">
+        Reads: <span>Gmail MCP</span> <span>pf_preferences</span> <span>pf_linkedin_network</span><br/>
+        Writes: <span>pf_feed_queue</span> <span>pf_feed_runs</span>
+      </div>
+    </div>
+
+    <div class="agent-card" style="border-left-color: var(--amber);">
+      <h3>🎯 Pipeline Orchestrator</h3>
+      <div class="trigger">Browser-side: on page load + user actions</div>
+      <div class="detail">Manages role lifecycle through kanban stages. Detects stale roles (7-14 day thresholds), validates stage transitions, and triggers Resume Tailor and Outreach Drafter when roles move to "Applying" or "Reaching Out".</div>
+      <div class="io">
+        Reads/Writes: <span>pf_roles</span> <span>pf_feed_queue</span><br/>
+        Triggers: <span>resume-requests/</span> <span>outreach-requests/</span>
+      </div>
+    </div>
+
+    <div class="agent-card" style="border-left-color: var(--green);">
+      <h3>📄 Resume Tailor</h3>
+      <div class="trigger">Scheduled: every 15 min (polls queue)</div>
+      <div class="detail">Generates tailored one-page PDF resumes using the bullet bank and SKILL.md honesty rules. Creates DOCX with python-docx, converts to PDF via LibreOffice. Every claim validated against 5 honesty checks.</div>
+      <div class="io">
+        Reads: <span>resume-requests/</span> <span>pf_roles</span> <span>SKILL.md</span><br/>
+        Writes: <span>generated-resumes/</span>
+      </div>
+    </div>
+
+    <div class="agent-card" style="border-left-color: var(--indigo);">
+      <h3>✉️ Outreach Drafter</h3>
+      <div class="trigger">Scheduled: every 15 min (polls queue)</div>
+      <div class="detail">Generates personalized outreach messages across 5 templates (LinkedIn connect, InMail, cold email, referral email, referral ask). Uses real proof points only. Enforces platform character limits.</div>
+      <div class="io">
+        Reads: <span>outreach-requests/</span> <span>pf_roles</span> <span>pf_linkedin_network</span><br/>
+        Writes: <span>outreach-requests/</span> (updates in-place)
+      </div>
+    </div>
+
+    <div class="agent-card" style="border-left-color: var(--rose);">
+      <h3>🩺 Health Monitor</h3>
+      <div class="trigger">Scheduled: every 30 min</div>
+      <div class="detail">Validates all agents, data integrity (JSON parsing, wrapper format), feed freshness, stuck resume requests, stale pipeline roles, and score drift. Produces actionable recommendations.</div>
+      <div class="io">
+        Reads: <span>All .pathfinder-data/ files</span> (read-only)<br/>
+        Writes: <span>pf_health_report</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Data Flow Table -->
+  <div class="data-flow">
+    <h2>Data Flow Summary</h2>
+    <table class="flow-table">
+      <thead>
+        <tr>
+          <th>From</th>
+          <th>To</th>
+          <th>Via</th>
+          <th>Trigger</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Gmail (LinkedIn + Jobright)</td>
+          <td>Feed Scout</td>
+          <td><code>search_threads</code> / <code>get_thread</code></td>
+          <td>Scheduled 2x daily</td>
+        </tr>
+        <tr>
+          <td>Feed Scout</td>
+          <td>Pipeline Orchestrator</td>
+          <td><code>pf_feed_queue.json</code></td>
+          <td>User approves item</td>
+        </tr>
+        <tr>
+          <td>Pipeline Orchestrator</td>
+          <td>Resume Tailor</td>
+          <td><code>resume-requests/*.json</code></td>
+          <td>Role → "Applying" stage</td>
+        </tr>
+        <tr>
+          <td>Pipeline Orchestrator</td>
+          <td>Outreach Drafter</td>
+          <td><code>outreach-requests/*.json</code></td>
+          <td>User clicks "Draft Outreach"</td>
+        </tr>
+        <tr>
+          <td>Health Monitor</td>
+          <td>Dashboard</td>
+          <td><code>pf_health_report.json</code></td>
+          <td>Scheduled every 30 min</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      flowchart: {
+        useMaxWidth: true,
+        htmlLabels: true,
+        curve: 'basis'
+      },
+      securityLevel: 'loose'
+    });
+  </script>
+</body>
+</html>

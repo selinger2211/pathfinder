@@ -522,4 +522,7 @@
       }
     }, 30000);
   }
+
+  // Expose syncNewerFromBridge so modules can trigger a manual refresh
+  window.syncNewerFromBridge = syncNewerFromBridge;
 })();

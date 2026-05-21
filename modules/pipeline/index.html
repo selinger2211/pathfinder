@@ -873,6 +873,41 @@
       .detail-panel { width: 100%; }
       .companies-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
     }
+    /* Stale Nudge Banner */
+    .stale-nudge {
+      background: #FEF3C7;
+      border-top: 1px solid #F59E0B;
+      padding: 4px 8px;
+      font-size: 0.7rem;
+      color: #92400E;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-radius: 0 0 8px 8px;
+      margin: 4px -8px -8px -8px;
+    }
+    [data-theme="dark"] .stale-nudge {
+      background: #78350F;
+      border-top-color: #D97706;
+      color: #FEF3C7;
+    }
+
+    /* Batch Operations Dropdown */
+    .batch-op-item:hover {
+      background: var(--bg-elevated) !important;
+    }
+
+    /* Inline spinner for buttons/status */
+    .spinner-sm {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin-sm 0.6s linear infinite;
+    }
+    @keyframes spin-sm { to { transform: rotate(360deg); } }
   </style>
 </head>
 
@@ -1238,7 +1273,10 @@
   <script src="../shared/pipeline-logic.js?v=3.10.1"></script>
   <script src="../shared/text-utils.js?v=3.10.1"></script>
   <script src="../shared/comp-utils.js?v=3.10.1"></script>
+  <script src="../shared/score-engine.js?v=3.10.1"></script>
+  <script src="../shared/fit-assessment.js?v=3.10.1"></script>
   <script src="../shared/command-palette.js?v=3.10.1"></script>
+  <script src="../shared/outreach-templates.js?v=3.10.1"></script>
   <script src="./pipeline.js?v=3.9.1"></script>
 </body>
 </html>
